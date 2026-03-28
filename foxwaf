@@ -1,0 +1,430 @@
+#!/bin/bash
+# FoxWAF 管理工具
+# 用法: foxwaf {start|stop|restart|status|logs|update|export|import|uninstall|version}
+
+set -euo pipefail
+
+INSTALL_DIR="/data/foxwaf"
+MODE="docker"
+
+COLOR_RED='\033[0;31m'
+COLOR_GREEN='\033[0;32m'
+COLOR_YELLOW='\033[1;33m'
+COLOR_CYAN='\033[0;36m'
+COLOR_RESET='\033[0m'
+
+log_info()  { echo -e "${COLOR_GREEN}[INFO]${COLOR_RESET}  $*"; }
+log_error() { echo -e "${COLOR_RED}[ERROR]${COLOR_RESET} $*"; }
+log_warn()  { echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET}  $*"; }
+
+MIRROR_REPOS_GITHUB="https://github.com/kabubu/storage"
+MIRROR_REPOS_GITCODE="https://gitcode.com/kabubu/storage"
+MIRROR_REPOS_GITEE="https://gitee.com/kabubu/storage"
+MIRROR_REPOS_GITLAB="https://gitlab.com/kabubu/storage"
+
+detect_mode() {
+    if [[ -f "${INSTALL_DIR}/docker-compose.yml" ]]; then
+        MODE="docker"
+    elif systemctl list-unit-files foxwaf.service &>/dev/null 2>&1; then
+        MODE="bare"
+    fi
+}
+
+do_start() {
+    detect_mode
+    if [[ "$MODE" == "docker" ]]; then
+        cd "$INSTALL_DIR" && docker compose up -d
+    else
+        systemctl start foxwaf
+    fi
+    log_info "FoxWAF 已启动"
+}
+
+do_stop() {
+    detect_mode
+    if [[ "$MODE" == "docker" ]]; then
+        cd "$INSTALL_DIR" && docker compose down
+    else
+        systemctl stop foxwaf
+    fi
+    log_info "FoxWAF 已停止"
+}
+
+do_restart() {
+    detect_mode
+    if [[ "$MODE" == "docker" ]]; then
+        cd "$INSTALL_DIR" && docker compose restart
+    else
+        systemctl restart foxwaf
+    fi
+    log_info "FoxWAF 已重启"
+}
+
+do_status() {
+    detect_mode
+    echo -e "${COLOR_CYAN}═══════════════════ FoxWAF 状态 ═══════════════════${COLOR_RESET}"
+    echo ""
+    if [[ -f "${INSTALL_DIR}/.version" ]]; then
+        echo -e "  版本:     $(cat "${INSTALL_DIR}/.version")"
+    fi
+    echo -e "  安装目录: ${INSTALL_DIR}"
+    echo -e "  运行模式: ${MODE}"
+    echo ""
+
+    if [[ "$MODE" == "docker" ]]; then
+        if docker ps --filter "name=foxwaf" --format '{{.Status}}' 2>/dev/null | grep -q "Up"; then
+            echo -e "  状态:     ${COLOR_GREEN}运行中${COLOR_RESET}"
+            docker ps --filter "name=foxwaf" --format "  容器ID:   {{.ID}}\n  运行时间: {{.RunningFor}}" 2>/dev/null
+        else
+            echo -e "  状态:     ${COLOR_RED}已停止${COLOR_RESET}"
+        fi
+    else
+        if systemctl is-active foxwaf &>/dev/null; then
+            echo -e "  状态:     ${COLOR_GREEN}运行中${COLOR_RESET}"
+            local pid
+            pid=$(systemctl show foxwaf --property=MainPID --value 2>/dev/null)
+            if [[ -n "$pid" && "$pid" != "0" ]]; then
+                echo -e "  PID:      $pid"
+                local mem
+                mem=$(ps -p "$pid" -o rss= 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')
+                echo -e "  内存:     $mem"
+                local uptime
+                uptime=$(ps -p "$pid" -o etime= 2>/dev/null | xargs)
+                echo -e "  运行时间: $uptime"
+            fi
+        else
+            echo -e "  状态:     ${COLOR_RED}已停止${COLOR_RESET}"
+        fi
+    fi
+
+    if [[ -f "${INSTALL_DIR}/conf.yaml" ]]; then
+        local port
+        port=$(grep -oP 'port:\s*\K\d+' "${INSTALL_DIR}/conf.yaml" 2>/dev/null | head -1)
+        local entry
+        entry=$(grep -oP 'secureentry:\s*"\K[^"]+' "${INSTALL_DIR}/conf.yaml" 2>/dev/null | head -1)
+        if [[ -n "$port" ]]; then
+            echo -e "  管理面板: http://localhost:${port}/${entry:-foxadmin}"
+        fi
+    fi
+    echo ""
+    echo -e "${COLOR_CYAN}══════════════════════════════════════════════════${COLOR_RESET}"
+}
+
+do_logs() {
+    detect_mode
+    if [[ "$MODE" == "docker" ]]; then
+        cd "$INSTALL_DIR" && docker compose logs -f --tail 100
+    else
+        journalctl -u foxwaf -f --no-pager -n 100
+    fi
+}
+
+do_export() {
+    detect_mode
+    local backup_dir="${INSTALL_DIR}/backup"
+    mkdir -p "$backup_dir"
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="${backup_dir}/foxwaf-backup-${timestamp}.tar.gz"
+
+    log_info "开始导出备份..."
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+
+    for item in conf.yaml source.enc waf .version docker-compose.yml; do
+        cp -a "${INSTALL_DIR}/${item}" "$tmpdir/" 2>/dev/null || true
+    done
+
+    for subdir in data certificates plugins history; do
+        if [[ -d "${INSTALL_DIR}/${subdir}" ]]; then
+            cp -a "${INSTALL_DIR}/${subdir}" "$tmpdir/"
+        fi
+    done
+
+    for dbfile in "${INSTALL_DIR}"/*.db "${INSTALL_DIR}"/data/*.db; do
+        if [[ -f "$dbfile" ]]; then
+            cp -a "$dbfile" "$tmpdir/" 2>/dev/null || true
+        fi
+    done
+
+    if [[ "$MODE" == "docker" ]]; then
+        log_info "导出 Docker 镜像..."
+        local image_name
+        image_name=$(grep -oP 'image:\s*\K\S+' "${INSTALL_DIR}/docker-compose.yml" 2>/dev/null | head -1)
+        if [[ -n "$image_name" ]]; then
+            docker save "$image_name" -o "${tmpdir}/docker-image.tar" 2>/dev/null || log_warn "Docker 镜像导出失败 (镜像可能不存在)"
+        fi
+    fi
+
+    tar -czf "$backup_file" -C "$tmpdir" .
+    rm -rf "$tmpdir"
+
+    local size
+    size=$(du -sh "$backup_file" | awk '{print $1}')
+    log_info "备份完成: $backup_file ($size)"
+}
+
+do_import() {
+    local backup_file="${1:-}"
+    if [[ -z "$backup_file" ]]; then
+        local latest
+        latest=$(ls -t "${INSTALL_DIR}/backup"/foxwaf-backup-*.tar.gz 2>/dev/null | head -1)
+        if [[ -z "$latest" ]]; then
+            log_error "请指定备份文件路径: foxwaf import <path>"
+            exit 1
+        fi
+        backup_file="$latest"
+        log_info "使用最新备份: $backup_file"
+    fi
+
+    if [[ ! -f "$backup_file" ]]; then
+        log_error "备份文件不存在: $backup_file"
+        exit 1
+    fi
+
+    log_info "开始恢复: $backup_file"
+    log_warn "将覆盖现有数据，建议先执行 foxwaf export"
+    read -rp "确认恢复? [y/N] " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        log_info "已取消"
+        exit 0
+    fi
+
+    detect_mode
+    do_stop 2>/dev/null || true
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    tar -xzf "$backup_file" -C "$tmpdir"
+
+    mkdir -p "$INSTALL_DIR"
+
+    for item in "$tmpdir"/*; do
+        local name
+        name=$(basename "$item")
+        [[ "$name" == "docker-image.tar" ]] && continue
+        [[ "$name" == "backup" ]] && continue
+        cp -a "$item" "${INSTALL_DIR}/"
+    done
+    for item in "$tmpdir"/.*; do
+        local name
+        name=$(basename "$item")
+        [[ "$name" == "." || "$name" == ".." ]] && continue
+        cp -a "$item" "${INSTALL_DIR}/"
+    done
+
+    if [[ -f "${tmpdir}/docker-image.tar" ]]; then
+        log_info "导入 Docker 镜像..."
+        docker load -i "${tmpdir}/docker-image.tar" 2>/dev/null || log_warn "Docker 镜像导入失败"
+    fi
+
+    chmod 755 "${INSTALL_DIR}/waf" 2>/dev/null || true
+    rm -rf "$tmpdir"
+
+    log_info "恢复完成"
+    do_start
+}
+
+get_mirror_url() {
+    local mirror_name="$1"
+    case "$mirror_name" in
+        github)  echo "$MIRROR_REPOS_GITHUB" ;;
+        gitcode) echo "$MIRROR_REPOS_GITCODE" ;;
+        gitee)   echo "$MIRROR_REPOS_GITEE" ;;
+        gitlab)  echo "$MIRROR_REPOS_GITLAB" ;;
+        *)       echo "" ;;
+    esac
+}
+
+build_download_url() {
+    local repo="$1" version="$2" file="$3" platform="$4"
+    local tag="v${version}"
+    case "$platform" in
+        gitlab) echo "${repo}/-/releases/${tag}/downloads/${file}" ;;
+        *)      echo "${repo}/releases/download/${tag}/${file}" ;;
+    esac
+}
+
+download_file() {
+    local file="$1" dest="$2" version="$3"
+    for m in gitcode github gitee gitlab; do
+        local repo
+        repo=$(get_mirror_url "$m")
+        [[ -z "$repo" ]] && continue
+        local url
+        url=$(build_download_url "$repo" "$version" "$file" "$m")
+        log_info "尝试下载: [$m] $file"
+        if curl -fSL --connect-timeout 15 --max-time 300 -o "$dest" "$url" 2>/dev/null; then
+            log_info "下载成功: $file ($m)"
+            return 0
+        fi
+    done
+    return 1
+}
+
+do_update() {
+    log_info "检查更新..."
+    local current_version="0.0.0"
+    if [[ -f "${INSTALL_DIR}/.version" ]]; then
+        current_version=$(cat "${INSTALL_DIR}/.version")
+    fi
+
+    local resp
+    resp=$(curl -s --connect-timeout 10 -X POST "https://server.foxwaf.cn:8443/api/update/check" \
+        -H "Content-Type: application/json" \
+        -d "{\"currentVersion\":\"${current_version}\"}" 2>/dev/null) || true
+
+    if [[ -z "$resp" ]]; then
+        log_error "无法连接更新服务器"
+        exit 1
+    fi
+
+    local has_update
+    has_update=$(echo "$resp" | grep -oP '"hasUpdate"\s*:\s*\K(true|false)' | head -1)
+    if [[ "$has_update" != "true" ]]; then
+        log_info "当前已是最新版本: $current_version"
+        return 0
+    fi
+
+    local new_version
+    new_version=$(echo "$resp" | grep -oP '"version"\s*:\s*"[^"]*"' | head -1 | grep -oP '"[^"]*"$' | tr -d '"')
+    local features
+    features=$(echo "$resp" | grep -oP '"features"\s*:\s*"[^"]*"' | head -1 | grep -oP '"[^"]*"$' | tr -d '"')
+
+    echo ""
+    echo -e "${COLOR_CYAN}发现新版本: ${new_version}${COLOR_RESET}"
+    if [[ -n "${features:-}" ]]; then
+        echo -e "  特性: ${features}"
+    fi
+    echo -e "  当前: ${current_version}"
+    echo ""
+    read -rp "是否更新? [y/N] " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        log_info "已取消更新"
+        return 0
+    fi
+
+    log_info "备份当前版本..."
+    cp "${INSTALL_DIR}/waf" "${INSTALL_DIR}/waf.bak" 2>/dev/null || true
+    cp "${INSTALL_DIR}/source.enc" "${INSTALL_DIR}/source.enc.bak" 2>/dev/null || true
+
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap "rm -rf '$tmpdir'" EXIT
+
+    log_info "下载新版本 ${new_version} ..."
+    if download_file "waf" "${tmpdir}/waf" "$new_version" && \
+       download_file "source.enc" "${tmpdir}/source.enc" "$new_version"; then
+
+        download_file "waf.md5" "${tmpdir}/waf.md5" "$new_version" || true
+        download_file "source.enc.md5" "${tmpdir}/source.enc.md5" "$new_version" || true
+
+        local ok=true
+        if [[ -f "${tmpdir}/waf.md5" ]]; then
+            local expected actual
+            expected=$(awk '{print $1}' "${tmpdir}/waf.md5" | tr '[:upper:]' '[:lower:]')
+            actual=$(md5sum "${tmpdir}/waf" | awk '{print $1}')
+            if [[ "$expected" != "$actual" ]]; then
+                log_error "waf MD5 校验失败"
+                ok=false
+            fi
+        fi
+        if [[ -f "${tmpdir}/source.enc.md5" ]]; then
+            local expected actual
+            expected=$(awk '{print $1}' "${tmpdir}/source.enc.md5" | tr '[:upper:]' '[:lower:]')
+            actual=$(md5sum "${tmpdir}/source.enc" | awk '{print $1}')
+            if [[ "$expected" != "$actual" ]]; then
+                log_error "source.enc MD5 校验失败"
+                ok=false
+            fi
+        fi
+
+        if [[ "$ok" == "true" ]]; then
+            detect_mode
+            do_stop 2>/dev/null || true
+            cp "${tmpdir}/waf" "${INSTALL_DIR}/waf"
+            chmod 755 "${INSTALL_DIR}/waf"
+            cp "${tmpdir}/source.enc" "${INSTALL_DIR}/source.enc"
+            echo "$new_version" > "${INSTALL_DIR}/.version"
+            do_start
+            log_info "更新成功: ${current_version} → ${new_version}"
+            rm -f "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/source.enc.bak"
+        else
+            log_error "校验失败，保持当前版本"
+            rm -f "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/source.enc.bak"
+        fi
+    else
+        log_error "下载失败，保持当前版本"
+        rm -f "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/source.enc.bak"
+    fi
+
+    rm -rf "$tmpdir"
+    trap - EXIT
+}
+
+do_uninstall() {
+    log_warn "即将卸载 FoxWAF"
+    read -rp "确认卸载? 数据将被保留在 ${INSTALL_DIR} [y/N] " confirm
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        log_info "已取消"
+        exit 0
+    fi
+
+    detect_mode
+    do_stop 2>/dev/null || true
+
+    if [[ -f "${INSTALL_DIR}/docker-compose.yml" ]]; then
+        cd "$INSTALL_DIR" && docker compose down --rmi local 2>/dev/null || true
+    fi
+    if systemctl list-unit-files foxwaf.service &>/dev/null 2>&1; then
+        systemctl disable foxwaf 2>/dev/null || true
+        rm -f /etc/systemd/system/foxwaf.service
+        systemctl daemon-reload
+    fi
+
+    rm -f /usr/local/bin/foxwaf
+    log_info "FoxWAF 已卸载 (数据保留在 ${INSTALL_DIR})"
+    log_info "如需彻底删除数据: rm -rf ${INSTALL_DIR}"
+}
+
+do_version() {
+    if [[ -f "${INSTALL_DIR}/.version" ]]; then
+        echo "FoxWAF $(cat "${INSTALL_DIR}/.version")"
+    else
+        echo "FoxWAF (版本未知)"
+    fi
+}
+
+show_usage() {
+    echo -e "${COLOR_CYAN}FoxWAF${COLOR_RESET} 管理工具"
+    echo ""
+    echo "用法: foxwaf <命令>"
+    echo ""
+    echo "命令:"
+    echo "  start       启动 FoxWAF"
+    echo "  stop        停止 FoxWAF"
+    echo "  restart     重启 FoxWAF"
+    echo "  status      查看运行状态"
+    echo "  logs        查看实时日志"
+    echo "  update      检查并应用更新"
+    echo "  export      导出数据备份 (含 Docker 镜像)"
+    echo "  import      从备份恢复 [foxwaf import <file>]"
+    echo "  uninstall   卸载 FoxWAF"
+    echo "  version     查看版本"
+}
+
+case "${1:-}" in
+    start)     do_start ;;
+    stop)      do_stop ;;
+    restart)   do_restart ;;
+    status)    do_status ;;
+    logs)      do_logs ;;
+    export)    do_export ;;
+    import)    do_import "${2:-}" ;;
+    update)    do_update ;;
+    uninstall) do_uninstall ;;
+    version)   do_version ;;
+    -h|--help) show_usage ;;
+    *)         show_usage; exit 1 ;;
+esac
