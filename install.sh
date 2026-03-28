@@ -507,8 +507,8 @@ do_uninstall() {
 # ─── 安装完成 ────────────────────────────────────────────────────────────────
 print_success() {
     local port entry
-    port=$(grep -oP 'port:\s*\K\d+' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1)
-    entry=$(grep -oP 'secureentry:\s*"\K[^"]+' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1)
+    port=$(grep -iP '^\s*Port:\s*\K\d+' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1)
+    entry=$(grep -iP '^\s*secureentry:\s*\K\S+' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1)
 
     echo ""
     echo -e "  ${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
