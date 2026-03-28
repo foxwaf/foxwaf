@@ -214,15 +214,20 @@ do_import() {
 }
 
 FOXWAF_SERVER="${FOXWAF_SERVER:-server.foxwaf.cn}"
-MIRROR_REPOS_GITHUB="https://github.com/kabubu/storage"
-MIRROR_REPOS_GITCODE="https://gitcode.com/kabubu/storage"
-MIRROR_REPOS_GITEE="https://gitee.com/kabubu/storage"
-MIRROR_REPOS_GITLAB="https://gitlab.com/kabubu/storage"
+MIRROR_REPOS_GITHUB="https://github.com/kabubu/foxwaf"
+MIRROR_REPOS_GITCODE="https://gitcode.com/kabubu/foxwaf"
+MIRROR_REPOS_GITEE="https://gitee.com/kabubu/foxwaf"
+MIRROR_REPOS_GITLAB="https://gitlab.com/kabubu/foxwaf"
 
 build_download_url() {
     local repo="$1" version="$2" file="$3" platform="$4"
     local tag="v${version}"
     case "$platform" in
+        gitcode)
+            local path="${repo#*gitcode.com/}"
+            path="${path%/}"
+            echo "https://api.gitcode.com/api/v5/repos/${path}/releases/${tag}/attach_files/${file}/download"
+            ;;
         gitlab) echo "${repo}/-/releases/${tag}/downloads/${file}" ;;
         *)      echo "${repo}/releases/download/${tag}/${file}" ;;
     esac
@@ -254,6 +259,15 @@ download_update_file() {
         return 0
     fi
     return 1
+}
+
+verify_md5_file() {
+    local file="$1" md5_file="$2"
+    [[ ! -f "$md5_file" ]] && return 0
+    local expected actual
+    expected=$(awk '{print $1}' "$md5_file" | tr '[:upper:]' '[:lower:]')
+    actual=$(md5sum "$file" | awk '{print $1}')
+    [[ "$expected" == "$actual" ]]
 }
 
 do_update() {
@@ -293,48 +307,58 @@ do_update() {
         return 0
     fi
 
-    log_info "备份当前版本..."
-    cp "${INSTALL_DIR}/waf" "${INSTALL_DIR}/waf.bak" 2>/dev/null || true
-    cp "${INSTALL_DIR}/source.enc" "${INSTALL_DIR}/source.enc.bak" 2>/dev/null || true
-
+    detect_mode
     local tmpdir
     tmpdir=$(mktemp -d)
 
-    log_info "下载新版本 ${new_version} ..."
-    if download_update_file "waf" "${tmpdir}/waf" "$new_version" && \
-       download_update_file "source.enc" "${tmpdir}/source.enc" "$new_version"; then
-
-        download_update_file "waf.md5" "${tmpdir}/waf.md5" "$new_version" 2>/dev/null || true
-        download_update_file "source.enc.md5" "${tmpdir}/source.enc.md5" "$new_version" 2>/dev/null || true
-
-        local ok=true
-        for pair in "waf:waf.md5" "source.enc:source.enc.md5"; do
-            local f="${pair%%:*}" mf="${pair##*:}"
-            if [[ -f "${tmpdir}/${mf}" ]]; then
-                local expected actual
-                expected=$(awk '{print $1}' "${tmpdir}/${mf}" | tr '[:upper:]' '[:lower:]')
-                actual=$(md5sum "${tmpdir}/${f}" | awk '{print $1}')
-                if [[ "$expected" != "$actual" ]]; then
-                    log_error "${f} MD5 校验失败"
-                    ok=false
-                fi
+    if [[ "$MODE" == "docker" ]]; then
+        log_info "下载新版本镜像 ${new_version} ..."
+        if download_update_file "foxwaf-image.tar.gz" "${tmpdir}/foxwaf-image.tar.gz" "$new_version"; then
+            download_update_file "foxwaf-image.tar.gz.md5" "${tmpdir}/foxwaf-image.tar.gz.md5" "$new_version" 2>/dev/null || true
+            if verify_md5_file "${tmpdir}/foxwaf-image.tar.gz" "${tmpdir}/foxwaf-image.tar.gz.md5"; then
+                log_info "导入新镜像..."
+                docker load -i "${tmpdir}/foxwaf-image.tar.gz"
+                download_update_file "docker-compose.yaml" "${INSTALL_DIR}/docker-compose.yml" "$new_version" 2>/dev/null || true
+                do_stop 2>/dev/null || true
+                echo "$new_version" > "${INSTALL_DIR}/.version"
+                do_start
+                log_info "更新成功: ${current_version} → ${new_version}"
+            else
+                log_error "镜像 MD5 校验失败"
             fi
-        done
-
-        if [[ "$ok" == "true" ]]; then
-            do_stop 2>/dev/null || true
-            cp "${tmpdir}/waf" "${INSTALL_DIR}/waf"
-            chmod 755 "${INSTALL_DIR}/waf"
-            cp "${tmpdir}/source.enc" "${INSTALL_DIR}/source.enc"
-            echo "$new_version" > "${INSTALL_DIR}/.version"
-            do_start
-            log_info "更新成功: ${current_version} → ${new_version}"
-            rm -f "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/source.enc.bak"
         else
-            log_error "校验失败，保持当前版本"
+            log_error "镜像下载失败"
         fi
     else
-        log_error "下载失败，保持当前版本"
+        log_info "下载新版本 ${new_version} ..."
+        log_info "备份当前版本..."
+        cp "${INSTALL_DIR}/waf" "${INSTALL_DIR}/waf.bak" 2>/dev/null || true
+        cp "${INSTALL_DIR}/source.enc" "${INSTALL_DIR}/source.enc.bak" 2>/dev/null || true
+        if download_update_file "waf" "${tmpdir}/waf" "$new_version" && \
+           download_update_file "source.enc" "${tmpdir}/source.enc" "$new_version"; then
+            download_update_file "waf.md5" "${tmpdir}/waf.md5" "$new_version" 2>/dev/null || true
+            download_update_file "source.enc.md5" "${tmpdir}/source.enc.md5" "$new_version" 2>/dev/null || true
+            local ok=true
+            verify_md5_file "${tmpdir}/waf" "${tmpdir}/waf.md5" || ok=false
+            verify_md5_file "${tmpdir}/source.enc" "${tmpdir}/source.enc.md5" || ok=false
+            if [[ "$ok" == "true" ]]; then
+                do_stop 2>/dev/null || true
+                cp "${tmpdir}/waf" "${INSTALL_DIR}/waf"
+                chmod 755 "${INSTALL_DIR}/waf"
+                cp "${tmpdir}/source.enc" "${INSTALL_DIR}/source.enc"
+                echo "$new_version" > "${INSTALL_DIR}/.version"
+                do_start
+                log_info "更新成功: ${current_version} → ${new_version}"
+                rm -f "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/source.enc.bak"
+            else
+                log_error "校验失败，回滚..."
+                mv "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/waf" 2>/dev/null || true
+                mv "${INSTALL_DIR}/source.enc.bak" "${INSTALL_DIR}/source.enc" 2>/dev/null || true
+            fi
+        else
+            log_error "下载失败，保持当前版本"
+            rm -f "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/source.enc.bak"
+        fi
     fi
     rm -rf "$tmpdir"
 }
