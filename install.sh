@@ -34,8 +34,9 @@ MIRROR_REPOS_GITCODE="https://gitcode.com/kabubu/storage"
 MIRROR_REPOS_GITEE="https://gitee.com/kabubu/storage"
 MIRROR_REPOS_GITLAB="https://gitlab.com/kabubu/storage"
 
-SERVER_API="http://server.foxwaf.cn:8080/api/update/check"
-SERVER_DOWNLOAD_BASE="http://server.foxwaf.cn:8080/release"
+FOXWAF_SERVER="${FOXWAF_SERVER:-server.foxwaf.cn}"
+SERVER_API="http://${FOXWAF_SERVER}:8080/api/update/check"
+SERVER_DOWNLOAD_BASE="http://${FOXWAF_SERVER}:8080/release"
 
 log_info()  { echo -e "${COLOR_GREEN}[INFO]${COLOR_RESET}  $*"; }
 log_warn()  { echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET}  $*"; }
