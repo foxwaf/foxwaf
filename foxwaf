@@ -185,7 +185,7 @@ do_status() {
             [[ -n "$img_size" ]] && img_size=$(_human_bytes "$img_size")
 
             local stats
-            stats=$(docker stats "$CONTAINER" --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}' 2>/dev/null)
+            stats=$(timeout 2 docker stats "$CONTAINER" --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}' 2>/dev/null)
             if [[ -n "$stats" ]]; then
                 cpu_str=$(echo "$stats" | cut -d'|' -f1 | tr -d ' ')
                 local cpu_raw
@@ -243,7 +243,8 @@ do_status() {
             live_ver=$(cat "${INSTALL_DIR}/history/current" 2>/dev/null | tr -d '[:space:]')
         fi
         [[ -n "$live_ver" ]] && ver="$live_ver"
-        conns=$(ss -tnp 2>/dev/null | grep -c ":${port} " 2>/dev/null || echo 0)
+        conns=$(ss -tnp 2>/dev/null | grep -c ":${port} " 2>/dev/null; true)
+        conns=${conns:-0}; conns=$(echo "$conns" | head -1 | tr -d '[:space:]')
     fi
 
     # ── header ──
@@ -285,11 +286,13 @@ do_status() {
         (( cpu_pct > 80 )) && cpu_bar_color="$R"
         printf "    ${DM}CPU${N}     $(_bar "$cpu_pct" 100 20 "$cpu_bar_color")  ${W}%s${N}\n" "${cpu_str:-0%}"
 
+        local mem_bar_color="$G"
+        (( mem_pct > 50 )) && mem_bar_color="$Y"
+        (( mem_pct > 80 )) && mem_bar_color="$R"
         if [[ -n "$mem_str" ]]; then
-            local mem_bar_color="$G"
-            (( mem_pct > 50 )) && mem_bar_color="$Y"
-            (( mem_pct > 80 )) && mem_bar_color="$R"
             printf "    ${DM}Memory${N}  $(_bar "$mem_pct" 100 20 "$mem_bar_color")  ${W}%s${N}  ${DM}(%s%%)${N}\n" "$mem_str" "$mem_pct"
+        else
+            printf "    ${DM}Memory${N}  $(_bar 0 100 20)  ${DM}--${N}\n"
         fi
         _gap
 
