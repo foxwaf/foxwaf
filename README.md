@@ -167,7 +167,7 @@ foxwaf version        # 当前版本号
   状态    ✓ 运行中
   详情    a1b2c3d4  2 hours ago
   目录    /data/foxwaf
-  面板    http://localhost:8088/foxadmin
+  面板    http://localhost:8088/fox
 ```
 
 ---
@@ -251,17 +251,23 @@ FoxWAF 采用**多镜像源智能更新**架构：
 默认配置文件 `conf.yaml` 位于安装目录：
 
 ```yaml
+Database:
+    DBName: waf.db
 Server:
     Addr: 0.0.0.0
-    Port: 8088              # 管理面板端口
-    HTTPS: false            # 管理面板 HTTPS
-Database:
-    DBName: waf.db          # SQLite 数据库文件名
-secureentry: foxadmin       # 管理面板路径
-username: fox               # 管理员用户名
-password: fox               # 管理员密码（请修改）
+    Port: 8088                  # 管理面板端口
+    HTTPS: false                # 管理面板 HTTPS
+    CertFile: ""                # HTTPS 证书路径
+    KeyFile: ""                 # HTTPS 私钥路径
+    HTTPRedirectPort: 0         # HTTP→HTTPS 重定向端口
 Update:
-    CheckIntervalMinutes: 10
+    CheckIntervalMinutes: 0     # 自动检查更新间隔（分钟），0=不自动检查
+    MaxBackupVersions: 0        # 最多保留备份数，0=不限
+    MaxBackupDays: 0            # 最多保留天数，0=不限
+    UpdateStrategy: ""          # manual_restart | download_only | auto_restart_low_peak
+secureentry: fox                # 管理面板入口路径
+username: fox                   # 管理员用户名
+password: <SHA256 或明文>       # 管理员密码（支持 SHA256 哈希或明文）
 ```
 
 > ⚠️ **安装后请立即修改默认密码**
