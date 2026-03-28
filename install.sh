@@ -11,6 +11,7 @@ NO_START=false
 FOXWAF_SERVER="${FOXWAF_SERVER:-server.foxwaf.cn}"
 SERVER_API="http://${FOXWAF_SERVER}:8080/api/update/check"
 SERVER_DOWNLOAD="http://${FOXWAF_SERVER}:8080/release"
+WAF_DEFAULT_PORT=8088
 
 MIRRORS_GITHUB="https://github.com/kabubu/foxwaf"
 MIRRORS_GITCODE="https://gitcode.com/kabubu/foxwaf"
@@ -413,20 +414,17 @@ create_config() {
     [[ -f "$INSTALL_DIR/conf.yaml" ]] && { log_dim "配置文件已存在，跳过"; return; }
     mkdir -p "$INSTALL_DIR/data"
     cat > "$INSTALL_DIR/conf.yaml" << 'EOF'
-server:
-  addr: "0.0.0.0"
-  port: 8080
-  https: false
-
-database:
-  type: "sqlite3"
-
-secureentry: "foxadmin"
-username: "fox"
-password: "fox"
-
-update:
-  check_interval_minutes: 10
+Server:
+    Addr: 0.0.0.0
+    Port: 8088
+    HTTPS: false
+Database:
+    DBName: waf.db
+secureentry: foxadmin
+username: fox
+password: fox
+Update:
+    CheckIntervalMinutes: 10
 EOF
     log_ok "默认配置已生成"
 }
