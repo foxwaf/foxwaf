@@ -243,7 +243,7 @@ do_status() {
             live_ver=$(cat "${INSTALL_DIR}/history/current" 2>/dev/null | tr -d '[:space:]')
         fi
         [[ -n "$live_ver" ]] && ver="$live_ver"
-        conns=$(ss -tnp 2>/dev/null | grep -c ":${port} " || echo 0)
+        conns=$(ss -tnp 2>/dev/null | grep -c ":${port} " 2>/dev/null || echo 0)
     fi
 
     # ── header ──
@@ -619,11 +619,24 @@ show_help() {
 # ── 入口 ─────────────────────────────────────────────────────────
 [[ ! -d "$INSTALL_DIR" ]] && { log_err "未找到安装目录: ${INSTALL_DIR}"; exit 1; }
 
+do_status_live() {
+    trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
+    tput civis 2>/dev/null
+    while true; do
+        local out
+        out=$(do_status 2>&1)
+        tput clear 2>/dev/null || printf "\033[H\033[2J"
+        printf "%s\n" "$out"
+        printf "  ${DM}Ctrl+C 退出  ·  每 1s 刷新${N}\n"
+        sleep 1
+    done
+}
+
 case "${1:-}" in
     start)     do_start ;;
     stop)      do_stop ;;
     restart)   do_restart ;;
-    status)    do_status ;;
+    status)    do_status_live ;;
     logs)      do_logs ;;
     update)    do_update ;;
     export)    do_export ;;
