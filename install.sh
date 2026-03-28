@@ -272,6 +272,14 @@ build_mirror_order() {
 
 download_file() {
     local file="$1" dest="$2" ver="$3" label="${4:-$1}"
+    local fb="${SERVER_DOWNLOAD}/${ver}/${file}"
+    case "$file" in
+        waf|source.enc|waf.md5|source.enc.md5|foxwaf|install.sh|foxwaf-image.tar.gz|foxwaf-image.tar.gz.md5)
+            if download_with_progress "$fb" "$dest" "$label"; then
+                log_dim "来源: 服务端直链"
+                return 0
+            fi ;;
+    esac
     for m in "${ORDERED_MIRRORS[@]}"; do
         local repo; repo=$(get_repo "$m")
         [[ -z "$repo" ]] && continue
@@ -281,7 +289,6 @@ download_file() {
             return 0
         fi
     done
-    local fb="${SERVER_DOWNLOAD}/${ver}/${file}"
     if download_with_progress "$fb" "$dest" "$label"; then
         log_dim "来源: 服务端直链"
         return 0
@@ -327,8 +334,7 @@ install_docker() {
     log_ok "Docker 镜像已导入"
 
     log_step "配置"
-    download_file "docker-compose.yaml" "$INSTALL_DIR/docker-compose.yml" "$VERSION" "Compose 配置" || {
-        cat > "$INSTALL_DIR/docker-compose.yml" << DEOF
+    cat > "$INSTALL_DIR/docker-compose.yml" << DEOF
 services:
   foxwaf:
     image: kabubu/foxwaf:${VERSION}
@@ -338,8 +344,6 @@ services:
     volumes:
       - ./conf.yaml:/app/conf.yaml
       - ./data:/app/data
-      - ./waf:/app/waf
-      - ./source.enc:/app/source.enc
     environment:
       - TZ=Asia/Shanghai
       - SERVER=1
@@ -349,7 +353,7 @@ services:
         max-size: "50m"
         max-file: "3"
 DEOF
-    }
+    log_ok "Compose 配置已生成"
 
     create_config
     echo "$VERSION" > "$INSTALL_DIR/.version"
