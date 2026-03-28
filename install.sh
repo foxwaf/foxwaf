@@ -414,17 +414,24 @@ create_config() {
     [[ -f "$INSTALL_DIR/conf.yaml" ]] && { log_dim "配置文件已存在，跳过"; return; }
     mkdir -p "$INSTALL_DIR/data"
     cat > "$INSTALL_DIR/conf.yaml" << 'EOF'
-Server:
-    Addr: 0.0.0.0
-    Port: 8088
-    HTTPS: false
 Database:
     DBName: waf.db
-secureentry: foxadmin
-username: fox
-password: fox
+Server:
+    Addr: 0.0.0.0
+    CertFile: ""
+    HTTPRedirectPort: 0
+    HTTPS: false
+    KeyFile: ""
+    Port: 8088
 Update:
-    CheckIntervalMinutes: 10
+    CheckIntervalMinutes: 0
+    IgnoredVersion: ""
+    MaxBackupDays: 0
+    MaxBackupVersions: 0
+    UpdateStrategy: ""
+password: 776cb326ab0cd5f0a974c1b9606044d8485201f2db19cf8e3749bdee5f36e200
+secureentry: fox
+username: fox
 EOF
     log_ok "默认配置已生成"
 }
@@ -520,7 +527,7 @@ print_success() {
     echo -e "  ${DIM}模式${RESET}      $MODE"
     [[ -n "$port" ]] && echo -e "  ${DIM}面板${RESET}      http://<IP>:${port}/${entry:-foxadmin}"
     echo ""
-    echo -e "  ${DIM}默认账号${RESET}  fox / fox  ${RED}${BOLD}← 请立即修改${RESET}"
+    echo -e "  ${DIM}账号${RESET}      fox / fox  ${RED}${BOLD}← 请立即修改${RESET}"
     echo ""
     echo -e "  ${DIM}常用命令:${RESET}"
     echo -e "    foxwaf status     ${DIM}运行状态${RESET}"
