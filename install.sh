@@ -338,8 +338,11 @@ services:
     volumes:
       - ./conf.yaml:/app/conf.yaml
       - ./data:/app/data
+      - ./waf:/app/waf
+      - ./source.enc:/app/source.enc
     environment:
       - TZ=Asia/Shanghai
+      - SERVER=1
     logging:
       driver: json-file
       options:
