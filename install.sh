@@ -34,7 +34,8 @@ MIRROR_REPOS_GITCODE="https://gitcode.com/kabubu/storage"
 MIRROR_REPOS_GITEE="https://gitee.com/kabubu/storage"
 MIRROR_REPOS_GITLAB="https://gitlab.com/kabubu/storage"
 
-SERVER_API="https://server.foxwaf.cn:8443/api/update/check"
+SERVER_API="http://server.foxwaf.cn:8080/api/update/check"
+SERVER_DOWNLOAD_BASE="http://server.foxwaf.cn:8080/release"
 
 log_info()  { echo -e "${COLOR_GREEN}[INFO]${COLOR_RESET}  $*"; }
 log_warn()  { echo -e "${COLOR_YELLOW}[WARN]${COLOR_RESET}  $*"; }
@@ -279,7 +280,15 @@ download_file() {
         fi
         log_warn "下载失败: $platform, 尝试下一个镜像..."
     done
-    log_error "所有镜像均下载失败: $file"
+
+    local fallback_url="${SERVER_DOWNLOAD_BASE}/${version}/${file}"
+    log_info "尝试服务端直链回退: $fallback_url"
+    if curl -fSL --connect-timeout 15 --max-time 300 -o "$dest" "$fallback_url" 2>/dev/null; then
+        log_info "下载成功: $file (服务端直链)"
+        return 0
+    fi
+
+    log_error "所有下载源均失败: $file"
     return 1
 }
 
@@ -483,20 +492,26 @@ SEOF
 install_foxwaf_script() {
     log_info "安装管理脚本: $FOXWAF_BIN"
 
-    local script_url=""
-    for m in gitcode github gitee; do
-        local repo
-        repo=$(get_mirror_url "$m")
-        local url="${repo}/raw/main/foxwaf"
-        if curl -fsSL --connect-timeout 5 -o /dev/null "$url" 2>/dev/null; then
-            script_url="$url"
-            break
+    local downloaded=false
+    local raw_urls=(
+        "https://raw.githubusercontent.com/kabubu/storage/main/foxwaf"
+        "https://gitee.com/kabubu/storage/raw/main/foxwaf"
+    )
+    for url in "${raw_urls[@]}"; do
+        local tmpscript
+        tmpscript=$(mktemp)
+        if curl -fsSL --connect-timeout 10 -o "$tmpscript" "$url" 2>/dev/null; then
+            if head -1 "$tmpscript" | grep -q '^#!/bin/bash'; then
+                cp "$tmpscript" "$FOXWAF_BIN"
+                rm -f "$tmpscript"
+                downloaded=true
+                break
+            fi
         fi
+        rm -f "$tmpscript"
     done
 
-    if [[ -n "$script_url" ]]; then
-        curl -fsSL -o "$FOXWAF_BIN" "$script_url"
-    else
+    if [[ "$downloaded" != "true" ]]; then
         generate_foxwaf_script
     fi
 
