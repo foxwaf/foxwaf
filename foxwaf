@@ -132,55 +132,185 @@ do_restart() {
     do_start
 }
 
+_bar() {
+    local val=$1 max=$2 w=${3:-20} fill_c="${4:-$C}" empty_c="${5:-$DM}"
+    (( max == 0 )) && max=1
+    local filled=$(( val * w / max ))
+    (( val > 0 && filled == 0 )) && filled=1
+    (( filled > w )) && filled=$w
+    local empty=$(( w - filled ))
+    local bar_f="" bar_e=""
+    for ((i=0;i<filled;i++)); do bar_f+="█"; done
+    for ((i=0;i<empty;i++)); do bar_e+="░"; done
+    printf "%b%s%b%s%b" "$fill_c" "$bar_f" "$empty_c" "$bar_e" "$N"
+}
+
+_human_bytes() {
+    local bytes=$1
+    if (( bytes >= 1073741824 )); then
+        awk "BEGIN{printf \"%.1f GB\", $bytes/1073741824}"
+    elif (( bytes >= 1048576 )); then
+        awk "BEGIN{printf \"%.1f MB\", $bytes/1048576}"
+    elif (( bytes >= 1024 )); then
+        awk "BEGIN{printf \"%.1f KB\", $bytes/1024}"
+    else
+        echo "${bytes} B"
+    fi
+}
+
 do_status() {
     local ver="unknown"
     [[ -f "${INSTALL_DIR}/.version" ]] && ver=$(cat "${INSTALL_DIR}/.version")
     local mode="Bare Metal"; is_docker && mode="Docker"
 
-    local state="${R}Stopped${N}" state_dot="${R}●${N}" uptime="" container_id="" mem=""
+    local running=false state_txt="Stopped" state_color="$R"
+    local uptime="" container_id="" waf_pid=""
+    local cpu_pct=0 mem_used=0 mem_limit=0 mem_pct=0 mem_str="" cpu_str=""
+    local net_rx=0 net_tx=0 net_rx_str="" net_tx_str=""
+    local conns=0 port="" entry="" img_name="" img_size=""
+
+    port=$(awk '/^\s*Port:/{print $2; exit}' "${INSTALL_DIR}/conf.yaml" 2>/dev/null)
+    entry=$(awk '/^\s*secureentry:/{print $2; exit}' "${INSTALL_DIR}/conf.yaml" 2>/dev/null)
+    [[ -z "$port" ]] && port=8088
 
     if is_docker; then
         local raw
         raw=$(docker ps --filter "name=${CONTAINER}" --format '{{.Status}}|{{.ID}}' 2>/dev/null)
         if [[ -n "$raw" ]] && echo "$raw" | grep -qi "up"; then
-            state="${G}Running${N}"; state_dot="${G}●${N}"
+            running=true; state_txt="Running"; state_color="$G"
             container_id=$(echo "$raw" | cut -d'|' -f2)
             uptime=$(docker ps --filter "name=${CONTAINER}" --format '{{.RunningFor}}' 2>/dev/null)
+            img_name=$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)
+            img_size=$(docker image inspect "$img_name" --format '{{.Size}}' 2>/dev/null)
+            [[ -n "$img_size" ]] && img_size=$(_human_bytes "$img_size")
+
+            local stats
+            stats=$(docker stats "$CONTAINER" --no-stream --format '{{.CPUPerc}}|{{.MemUsage}}|{{.MemPerc}}|{{.NetIO}}' 2>/dev/null)
+            if [[ -n "$stats" ]]; then
+                cpu_str=$(echo "$stats" | cut -d'|' -f1 | tr -d ' ')
+                local cpu_raw
+                cpu_raw=$(echo "$cpu_str" | tr -d '%')
+                cpu_pct=$(echo "$cpu_raw" | cut -d'.' -f1)
+                [[ -z "$cpu_pct" ]] && cpu_pct=0
+                if (( cpu_pct == 0 )) && [[ "$cpu_raw" =~ \.[0-9]*[1-9] ]]; then cpu_pct=1; fi
+                mem_str=$(echo "$stats" | cut -d'|' -f2 | sed 's| *||g')
+                local mem_pct_raw
+                mem_pct_raw=$(echo "$stats" | cut -d'|' -f3 | tr -d ' %')
+                mem_pct=$(echo "$mem_pct_raw" | cut -d'.' -f1)
+                [[ -z "$mem_pct" ]] && mem_pct=0
+                if (( mem_pct == 0 )) && [[ "$mem_pct_raw" =~ \.[0-9]*[1-9] ]]; then mem_pct=1; fi
+                local net_io
+                net_io=$(echo "$stats" | cut -d'|' -f4 | sed 's| *||g')
+                net_rx_str=$(echo "$net_io" | cut -d'/' -f1)
+                net_tx_str=$(echo "$net_io" | cut -d'/' -f2)
+            fi
+
+            waf_pid=$(docker inspect "$CONTAINER" --format '{{.State.Pid}}' 2>/dev/null)
         fi
     else
-        local pid=""
-        [[ -f "${INSTALL_DIR}/waf.pid" ]] && pid=$(cat "${INSTALL_DIR}/waf.pid")
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            state="${G}Running${N}"; state_dot="${G}●${N}"
-            mem=$(ps -p "$pid" -o rss= 2>/dev/null | awk '{printf "%.1f MB", $1/1024}')
-            uptime="PID $pid"
+        [[ -f "${INSTALL_DIR}/waf.pid" ]] && waf_pid=$(cat "${INSTALL_DIR}/waf.pid")
+        if [[ -n "$waf_pid" ]] && kill -0 "$waf_pid" 2>/dev/null; then
+            running=true; state_txt="Running"; state_color="$G"
+            cpu_str=$(ps -p "$waf_pid" -o %cpu= 2>/dev/null | tr -d ' ')
+            cpu_pct=$(echo "$cpu_str" | cut -d'.' -f1)
+            [[ -n "$cpu_str" ]] && cpu_str="${cpu_str}%"
+            local rss_kb
+            rss_kb=$(ps -p "$waf_pid" -o rss= 2>/dev/null | tr -d ' ')
+            if [[ -n "$rss_kb" ]]; then
+                mem_used=$((rss_kb * 1024))
+                mem_str=$(_human_bytes "$mem_used")
+                local total_kb
+                total_kb=$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)
+                [[ -n "$total_kb" ]] && mem_limit=$((total_kb * 1024)) && mem_pct=$((rss_kb * 100 / total_kb))
+            fi
+            local elapsed
+            elapsed=$(ps -p "$waf_pid" -o etimes= 2>/dev/null | tr -d ' ')
+            if [[ -n "$elapsed" ]]; then
+                if (( elapsed >= 86400 )); then uptime="$((elapsed/86400))d $((elapsed%86400/3600))h"
+                elif (( elapsed >= 3600 )); then uptime="$((elapsed/3600))h $((elapsed%3600/60))m"
+                elif (( elapsed >= 60 )); then uptime="$((elapsed/60))m $((elapsed%60))s"
+                else uptime="${elapsed}s"
+                fi
+            fi
         fi
     fi
 
-    local port="" entry=""
-    port=$(awk '/^\s*Port:/{print $2; exit}' "${INSTALL_DIR}/conf.yaml" 2>/dev/null)
-    entry=$(awk '/^\s*secureentry:/{print $2; exit}' "${INSTALL_DIR}/conf.yaml" 2>/dev/null)
+    if [[ "$running" == "true" ]]; then
+        local live_ver=""
+        if is_docker; then
+            live_ver=$(docker exec "$CONTAINER" cat /app/history/current 2>/dev/null | tr -d '[:space:]')
+        elif [[ -f "${INSTALL_DIR}/history/current" ]]; then
+            live_ver=$(cat "${INSTALL_DIR}/history/current" 2>/dev/null | tr -d '[:space:]')
+        fi
+        [[ -n "$live_ver" ]] && ver="$live_ver"
+        conns=$(ss -tnp 2>/dev/null | grep -c ":${port} " || echo 0)
+    fi
 
+    # ── header ──
     _gap
-    printf "  ${C}${B}╭─────────────────────────────────────────╮${N}\n"
-    printf "  ${C}${B}│${N}  ${B}FoxWAF${N}  ${DM}Web Application Firewall${N}      ${C}${B}│${N}\n"
-    printf "  ${C}${B}╰─────────────────────────────────────────╯${N}\n"
+    printf "  ${C}${B}╭──────────────────────────────────────────────────╮${N}\n"
+    printf "  ${C}${B}│${N}                                                  ${C}${B}│${N}\n"
+    printf "  ${C}${B}│${N}   ${B}◈  FoxWAF${N}  ${DM}Web Application Firewall${N}          ${C}${B}│${N}\n"
+    printf "  ${C}${B}│${N}                                                  ${C}${B}│${N}\n"
+    printf "  ${C}${B}╰──────────────────────────────────────────────────╯${N}\n"
     _gap
-    log_kv "Status" "${state_dot} ${state}"
-    log_kv "Version" "${B}${ver}${N}"
-    log_kv "Mode" "${mode}"
-    [[ -n "$uptime" ]] && log_kv "Uptime" "${uptime}"
-    [[ -n "$container_id" ]] && log_kv "Container" "${DM}${container_id}${N}"
-    [[ -n "$mem" ]] && log_kv "Memory" "${mem}"
-    log_kv "Directory" "${DM}${INSTALL_DIR}${N}"
+
+    # ── service ──
+    printf "  ${C}${B}▎${N} ${W}${B}SERVICE${N}\n"
     _gap
-    _line
+    printf "    ${DM}Status${N}      ${state_color}●${N} ${state_color}${B}${state_txt}${N}\n"
+    printf "    ${DM}Version${N}     ${B}${ver}${N}\n"
+    printf "    ${DM}Mode${N}        ${W}${mode}${N}\n"
+    [[ -n "$uptime" ]] && \
+    printf "    ${DM}Uptime${N}      ${W}${uptime}${N}\n"
+    if is_docker; then
+        [[ -n "$container_id" ]] && \
+        printf "    ${DM}Container${N}   ${DM}${container_id}${N}\n"
+        [[ -n "$img_name" ]] && \
+        printf "    ${DM}Image${N}       ${DM}${img_name}${N}  ${DM}(${img_size:-?})${N}\n"
+    else
+        [[ -n "$waf_pid" ]] && \
+        printf "    ${DM}PID${N}         ${DM}${waf_pid}${N}\n"
+    fi
+    printf "    ${DM}Directory${N}   ${DM}${INSTALL_DIR}${N}\n"
     _gap
-    if [[ -n "$port" ]]; then
-        local url="http://localhost:${port}/${entry:-fox}"
-        printf "  ${DM}Panel${N}    ${C}${U}%s${N}\n" "$url"
+
+    if [[ "$running" == "true" ]]; then
+        # ── resources ──
+        printf "  ${C}${B}▎${N} ${W}${B}RESOURCES${N}\n"
+        _gap
+
+        local cpu_bar_color="$G"
+        (( cpu_pct > 50 )) && cpu_bar_color="$Y"
+        (( cpu_pct > 80 )) && cpu_bar_color="$R"
+        printf "    ${DM}CPU${N}     $(_bar "$cpu_pct" 100 20 "$cpu_bar_color")  ${W}%s${N}\n" "${cpu_str:-0%}"
+
+        if [[ -n "$mem_str" ]]; then
+            local mem_bar_color="$G"
+            (( mem_pct > 50 )) && mem_bar_color="$Y"
+            (( mem_pct > 80 )) && mem_bar_color="$R"
+            printf "    ${DM}Memory${N}  $(_bar "$mem_pct" 100 20 "$mem_bar_color")  ${W}%s${N}  ${DM}(%s%%)${N}\n" "$mem_str" "$mem_pct"
+        fi
+        _gap
+
+        # ── network ──
+        printf "  ${C}${B}▎${N} ${W}${B}NETWORK${N}\n"
+        _gap
+        printf "    ${DM}Listen${N}      ${C}:${port}${N}  ${DM}(HTTP)${N}\n"
+        printf "    ${DM}Conns${N}       ${W}${conns}${N} ${DM}active${N}\n"
+        if [[ -n "$net_rx_str" ]]; then
+            printf "    ${DM}Traffic${N}     ${G}▼${N} ${W}${net_rx_str}${N}  ${R}▲${N} ${W}${net_tx_str}${N}\n"
+        fi
         _gap
     fi
+
+    # ── panel ──
+    printf "  ${C}${B}▎${N} ${W}${B}PANEL${N}\n"
+    _gap
+    local url="http://localhost:${port}/${entry:-fox}"
+    printf "    ${DM}URL${N}         ${C}${U}${url}${N}\n"
+    printf "    ${DM}Port${N}        ${W}${port}${N}\n"
+    _gap
 }
 
 do_logs() {
