@@ -29,10 +29,10 @@ COLOR_CYAN='\033[0;36m'
 COLOR_RESET='\033[0m'
 COLOR_BOLD='\033[1m'
 
-MIRROR_REPOS_GITHUB="https://github.com/kabubu/storage"
-MIRROR_REPOS_GITCODE="https://gitcode.com/kabubu/storage"
-MIRROR_REPOS_GITEE="https://gitee.com/kabubu/storage"
-MIRROR_REPOS_GITLAB="https://gitlab.com/kabubu/storage"
+MIRROR_REPOS_GITHUB="https://github.com/kabubu/foxwaf"
+MIRROR_REPOS_GITCODE="https://gitcode.com/kabubu/foxwaf"
+MIRROR_REPOS_GITEE="https://gitee.com/kabubu/foxwaf"
+MIRROR_REPOS_GITLAB="https://gitlab.com/kabubu/foxwaf"
 
 FOXWAF_SERVER="${FOXWAF_SERVER:-server.foxwaf.cn}"
 SERVER_API="http://${FOXWAF_SERVER}:8080/api/update/check"
@@ -208,6 +208,11 @@ build_download_url() {
     local platform="$4"
     local tag="v${version}"
     case "$platform" in
+        gitcode)
+            local path="${repo#*gitcode.com/}"
+            path="${path%/}"
+            echo "https://api.gitcode.com/api/v5/repos/${path}/releases/${tag}/attach_files/${file}/download"
+            ;;
         gitlab)
             echo "${repo}/-/releases/${tag}/downloads/${file}"
             ;;
@@ -357,37 +362,30 @@ install_docker_mode() {
     tmpdir=$(mktemp -d)
     trap "rm -rf '$tmpdir'" EXIT
 
-    log_step "下载 FoxWAF 文件..."
-    download_file "waf" "${tmpdir}/waf" "$VERSION"
-    download_file "source.enc" "${tmpdir}/source.enc" "$VERSION"
+    log_step "下载 Docker 镜像..."
+    download_file "foxwaf-image.tar.gz" "${tmpdir}/foxwaf-image.tar.gz" "$VERSION"
+    download_file "foxwaf-image.tar.gz.md5" "${tmpdir}/foxwaf-image.tar.gz.md5" "$VERSION" || true
 
-    download_file "waf.md5" "${tmpdir}/waf.md5" "$VERSION" || true
-    download_file "source.enc.md5" "${tmpdir}/source.enc.md5" "$VERSION" || true
-
-    if [[ -f "${tmpdir}/waf.md5" ]]; then
-        verify_md5 "${tmpdir}/waf" "${tmpdir}/waf.md5"
-    fi
-    if [[ -f "${tmpdir}/source.enc.md5" ]]; then
-        verify_md5 "${tmpdir}/source.enc" "${tmpdir}/source.enc.md5"
+    if [[ -f "${tmpdir}/foxwaf-image.tar.gz.md5" ]]; then
+        verify_md5 "${tmpdir}/foxwaf-image.tar.gz" "${tmpdir}/foxwaf-image.tar.gz.md5"
     fi
 
-    cp "${tmpdir}/waf" "${INSTALL_DIR}/waf"
-    chmod 755 "${INSTALL_DIR}/waf"
-    cp "${tmpdir}/source.enc" "${INSTALL_DIR}/source.enc"
+    log_step "导入 Docker 镜像..."
+    docker load -i "${tmpdir}/foxwaf-image.tar.gz"
+    log_info "Docker 镜像导入成功"
 
-    create_default_config
-
-    cat > "${INSTALL_DIR}/${DOCKER_COMPOSE_FILE}" << DEOF
+    log_step "下载 docker-compose.yaml..."
+    if ! download_file "docker-compose.yaml" "${INSTALL_DIR}/${DOCKER_COMPOSE_FILE}" "$VERSION"; then
+        cat > "${INSTALL_DIR}/${DOCKER_COMPOSE_FILE}" << DEOF
 services:
   foxwaf:
-    image: debian:bookworm-slim
+    image: kabubu/foxwaf:${VERSION}
     container_name: foxwaf
     restart: unless-stopped
     network_mode: host
     volumes:
-      - ${INSTALL_DIR}:/app
-    working_dir: /app
-    entrypoint: ["./waf"]
+      - ./conf.yaml:/app/conf.yaml
+      - ./data:/app/data
     environment:
       - TZ=Asia/Shanghai
     logging:
@@ -396,7 +394,10 @@ services:
         max-size: "50m"
         max-file: "3"
 DEOF
+    fi
     log_info "已创建 docker-compose.yml"
+
+    create_default_config
 
     echo "$VERSION" > "${INSTALL_DIR}/.version"
 
@@ -495,8 +496,8 @@ install_foxwaf_script() {
 
     local downloaded=false
     local raw_urls=(
-        "https://raw.githubusercontent.com/kabubu/storage/main/foxwaf"
-        "https://gitee.com/kabubu/storage/raw/main/foxwaf"
+        "https://raw.githubusercontent.com/kabubu/foxwaf/main/foxwaf"
+        "https://gitee.com/kabubu/foxwaf/raw/main/foxwaf"
     )
     for url in "${raw_urls[@]}"; do
         local tmpscript
