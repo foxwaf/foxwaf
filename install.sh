@@ -433,23 +433,25 @@ EOF
 
 install_foxwaf_bin() {
     log_step "安装管理工具"
-    local ok=false
-    local urls=(
-        "https://raw.githubusercontent.com/kabubu/foxwaf/main/foxwaf"
-        "https://gitee.com/kabubu/foxwaf/raw/main/foxwaf"
-    )
-    for u in "${urls[@]}"; do
-        local tmp; tmp=$(mktemp)
-        if curl -fsSL --connect-timeout 8 -o "$tmp" "$u" 2>/dev/null; then
-            if head -1 "$tmp" | grep -q '^#!/bin/bash'; then
-                cp "$tmp" "$FOXWAF_BIN"; rm -f "$tmp"; ok=true; break
-            fi
+    local ok=false tmp
+    tmp=$(mktemp)
+
+    if download_file "foxwaf" "$tmp" "$VERSION" "foxwaf 脚本" 2>/dev/null; then
+        if head -1 "$tmp" | grep -q '^#!/bin/bash'; then
+            cp "$tmp" "$FOXWAF_BIN"; ok=true
         fi
-        rm -f "$tmp"
-    done
-    if [[ "$ok" != "true" ]]; then
-        generate_foxwaf_script
     fi
+
+    if [[ "$ok" != "true" ]]; then
+        for u in "https://raw.githubusercontent.com/kabubu/foxwaf/main/foxwaf" "https://gitee.com/kabubu/foxwaf/raw/main/foxwaf"; do
+            if curl -fsSL --connect-timeout 8 -o "$tmp" "$u" 2>/dev/null && head -1 "$tmp" | grep -q '^#!/bin/bash'; then
+                cp "$tmp" "$FOXWAF_BIN"; ok=true; break
+            fi
+        done
+    fi
+
+    rm -f "$tmp"
+    [[ "$ok" != "true" ]] && generate_foxwaf_script
     chmod +x "$FOXWAF_BIN"
     sed -i "s|^INSTALL_DIR=.*|INSTALL_DIR=\"${INSTALL_DIR}\"|" "$FOXWAF_BIN" 2>/dev/null || true
     log_ok "foxwaf 命令已安装"
