@@ -547,63 +547,27 @@ do_update() {
 
     local tmp; tmp=$(mktemp -d)
 
-    if is_docker; then
-        log_step "下载 Docker 镜像"
-        if _dl "foxwaf-image.tar.gz" "${tmp}/img.tar.gz" "$nv"; then
-            _dl "foxwaf-image.tar.gz.md5" "${tmp}/img.md5" "$nv" 2>/dev/null || true
-            if _md5ok "${tmp}/img.tar.gz" "${tmp}/img.md5"; then
-                log_ok "校验通过"
-                log_step "安装更新"
-                docker load -i "${tmp}/img.tar.gz" &>/dev/null &
-                if spinner $! "导入镜像"; then
-                    printf "\r%60s\r" ""
-                fi
-                _dl "docker-compose.yaml" "${INSTALL_DIR}/docker-compose.yml" "$nv" 2>/dev/null || true
-                _dl "waf" "${INSTALL_DIR}/waf" "$nv" 2>/dev/null || true
-                _dl "source.enc" "${INSTALL_DIR}/source.enc" "$nv" 2>/dev/null || true
-                chmod 755 "${INSTALL_DIR}/waf" 2>/dev/null || true
-                do_stop 2>/dev/null
-                echo "$nv" > "${INSTALL_DIR}/.version"
-                do_start
-                _gap
-                log_ok "更新完成  ${DM}${cv} → ${G}${B}${nv}${N}"
-            else
-                log_err "校验失败，已中止"
+    log_step "下载 Docker 镜像"
+    if _dl "foxwaf-image.tar.gz" "${tmp}/img.tar.gz" "$nv"; then
+        _dl "foxwaf-image.tar.gz.md5" "${tmp}/img.md5" "$nv" 2>/dev/null || true
+        if _md5ok "${tmp}/img.tar.gz" "${tmp}/img.md5"; then
+            log_ok "校验通过"
+            log_step "安装更新"
+            docker load -i "${tmp}/img.tar.gz" &>/dev/null &
+            if spinner $! "导入镜像"; then
+                printf "\r%60s\r" ""
             fi
+            _dl "docker-compose.yaml" "${INSTALL_DIR}/docker-compose.yml" "$nv" 2>/dev/null || true
+            do_stop 2>/dev/null
+            echo "$nv" > "${INSTALL_DIR}/.version"
+            do_start
+            _gap
+            log_ok "更新完成  ${DM}${cv} → ${G}${B}${nv}${N}"
         else
-            log_err "下载失败"
+            log_err "校验失败，已中止"
         fi
     else
-        log_step "下载新版本"
-        cp "${INSTALL_DIR}/waf" "${INSTALL_DIR}/waf.bak" 2>/dev/null || true
-        cp "${INSTALL_DIR}/source.enc" "${INSTALL_DIR}/source.enc.bak" 2>/dev/null || true
-        if _dl "waf" "${tmp}/waf" "$nv" && _dl "source.enc" "${tmp}/source.enc" "$nv"; then
-            _dl "waf.md5" "${tmp}/waf.md5" "$nv" 2>/dev/null || true
-            _dl "source.enc.md5" "${tmp}/src.md5" "$nv" 2>/dev/null || true
-            local allok=true
-            _md5ok "${tmp}/waf" "${tmp}/waf.md5" || allok=false
-            _md5ok "${tmp}/source.enc" "${tmp}/src.md5" || allok=false
-            if [[ "$allok" == "true" ]]; then
-                log_ok "校验通过"
-                log_step "安装更新"
-                do_stop 2>/dev/null
-                cp "${tmp}/waf" "${INSTALL_DIR}/waf"; chmod 755 "${INSTALL_DIR}/waf"
-                cp "${tmp}/source.enc" "${INSTALL_DIR}/source.enc"
-                echo "$nv" > "${INSTALL_DIR}/.version"
-                do_start
-                _gap
-                log_ok "更新完成  ${DM}${cv} → ${G}${B}${nv}${N}"
-                rm -f "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/source.enc.bak"
-            else
-                log_err "校验失败，正在回滚..."
-                mv "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/waf" 2>/dev/null || true
-                mv "${INSTALL_DIR}/source.enc.bak" "${INSTALL_DIR}/source.enc" 2>/dev/null || true
-                log_ok "已回滚到旧版本"
-            fi
-        else
-            log_err "下载失败"
-            rm -f "${INSTALL_DIR}/waf.bak" "${INSTALL_DIR}/source.enc.bak"
-        fi
+        log_err "下载失败"
     fi
     rm -rf "$tmp"
 }

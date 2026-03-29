@@ -122,7 +122,6 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --docker)    MODE="docker"; shift ;;
-            --bare)      MODE="bare"; shift ;;
             --mirror)    MIRROR="${2:-}"; shift 2 ;;
             --version)   VERSION="${2:-}"; shift 2 ;;
             --dir)       INSTALL_DIR="${2:-}"; shift 2 ;;
@@ -142,8 +141,6 @@ show_help() {
     install.sh [选项]
 
   ${BOLD}选项${RESET}
-    --docker         Docker 容器模式安装${DIM}（推荐）${RESET}
-    --bare           裸机模式安装
     --mirror NAME    首选镜像源 ${DIM}(github|gitcode|gitee|gitlab)${RESET}
     --version VER    指定版本号 ${DIM}(默认: 最新)${RESET}
     --dir PATH       安装目录 ${DIM}(默认: /data/foxwaf)${RESET}
@@ -205,8 +202,7 @@ detect_mode() {
         MODE="docker"
         log_ok "自动选择: Docker 模式"
     else
-        MODE="bare"
-        log_ok "自动选择: 裸机模式"
+        die "需要 Docker 和 Docker Compose 才能安装 FoxWAF\n  安装 Docker: curl -fsSL https://get.docker.com | sh"
     fi
 }
 
@@ -272,14 +268,6 @@ build_mirror_order() {
 
 download_file() {
     local file="$1" dest="$2" ver="$3" label="${4:-$1}"
-    local fb="${SERVER_DOWNLOAD}/${ver}/${file}"
-    case "$file" in
-        waf|source.enc|waf.md5|source.enc.md5|foxwaf|install.sh|foxwaf-image.tar.gz|foxwaf-image.tar.gz.md5)
-            if download_with_progress "$fb" "$dest" "$label"; then
-                log_dim "来源: 服务端直链"
-                return 0
-            fi ;;
-    esac
     for m in "${ORDERED_MIRRORS[@]}"; do
         local repo; repo=$(get_repo "$m")
         [[ -z "$repo" ]] && continue
@@ -289,8 +277,9 @@ download_file() {
             return 0
         fi
     done
+    local fb="${SERVER_DOWNLOAD}/${ver}/${file}"
     if download_with_progress "$fb" "$dest" "$label"; then
-        log_dim "来源: 服务端直链"
+        log_dim "来源: 服务端(兜底)"
         return 0
     fi
     return 1
@@ -371,47 +360,6 @@ DEOF
             log_ok "FoxWAF 运行中"
         else
             log_warn "容器可能未正常启动，请检查: foxwaf logs"
-        fi
-    fi
-}
-
-# ─── 裸机模式安装 ────────────────────────────────────────────────────────────
-install_bare() {
-    log_step "下载 (裸机模式)"
-    mkdir -p "$INSTALL_DIR"
-    build_mirror_order
-
-    local tmp; tmp=$(mktemp -d)
-    trap "rm -rf '$tmp'" EXIT
-
-    download_file "waf" "$tmp/waf" "$VERSION" "WAF 主程序" || die "WAF 下载失败"
-    download_file "source.enc" "$tmp/source.enc" "$VERSION" "资源文件  " || die "资源文件下载失败"
-    download_file "waf.md5" "$tmp/waf.md5" "$VERSION" "WAF 校验  " || true
-    download_file "source.enc.md5" "$tmp/src.md5" "$VERSION" "资源校验  " || true
-
-    local ok=true
-    [[ -f "$tmp/waf.md5" ]] && { verify_md5 "$tmp/waf" "$tmp/waf.md5" || ok=false; }
-    [[ -f "$tmp/src.md5" ]] && { verify_md5 "$tmp/source.enc" "$tmp/src.md5" || ok=false; }
-    [[ "$ok" == "true" ]] && log_ok "文件校验通过" || die "MD5 校验失败"
-
-    log_step "安装"
-    cp "$tmp/waf" "$INSTALL_DIR/waf" && chmod 755 "$INSTALL_DIR/waf"
-    cp "$tmp/source.enc" "$INSTALL_DIR/source.enc"
-    create_config
-    echo "$VERSION" > "$INSTALL_DIR/.version"
-    install_foxwaf_bin
-
-    rm -rf "$tmp"; trap - EXIT
-
-    if [[ "$NO_START" == "false" ]]; then
-        log_step "启动服务"
-        cd "$INSTALL_DIR" && nohup ./waf > waf.log 2>&1 &
-        echo $! > "$INSTALL_DIR/waf.pid"
-        sleep 2
-        if kill -0 "$(cat "$INSTALL_DIR/waf.pid" 2>/dev/null)" 2>/dev/null; then
-            log_ok "FoxWAF 运行中 (PID: $(cat "$INSTALL_DIR/waf.pid"))"
-        else
-            log_warn "启动可能失败，请检查: ${INSTALL_DIR}/waf.log"
         fi
     fi
 }
@@ -553,10 +501,7 @@ main() {
     detect_mode
     fetch_version
 
-    case "$MODE" in
-        docker) install_docker ;;
-        bare)   install_bare ;;
-    esac
+    install_docker
 
     print_success
 }
