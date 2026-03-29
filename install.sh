@@ -425,8 +425,8 @@ CONTAINER="foxwaf"
 R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; C='\033[0;36m'; B='\033[1m'; D='\033[2m'; N='\033[0m'
 ok() { echo -e "  ${G}✓${N}  $*"; }; err() { echo -e "  ${R}✗${N}  $*"; }; wrn() { echo -e "  ${Y}!${N}  $*"; }
 is_docker() { [[ -f "${INSTALL_DIR}/docker-compose.yml" ]]; }
-do_start() { if is_docker; then cd "$INSTALL_DIR" && docker compose up -d; else cd "$INSTALL_DIR" && nohup ./waf > waf.log 2>&1 & echo $! > waf.pid; fi; ok "已启动"; }
-do_stop()  { if is_docker; then cd "$INSTALL_DIR" && docker compose down 2>/dev/null || docker stop "$CONTAINER" 2>/dev/null; else [[ -f "$INSTALL_DIR/waf.pid" ]] && kill "$(cat "$INSTALL_DIR/waf.pid")" 2>/dev/null; rm -f "$INSTALL_DIR/waf.pid"; pkill -f "$INSTALL_DIR/waf" 2>/dev/null; fi; ok "已停止"; }
+do_start() { if is_docker; then if docker inspect "$CONTAINER" &>/dev/null; then docker start "$CONTAINER"; else cd "$INSTALL_DIR" && docker compose up -d; fi; else cd "$INSTALL_DIR" && nohup ./waf > waf.log 2>&1 & echo $! > waf.pid; fi; ok "已启动"; }
+do_stop()  { if is_docker; then docker stop "$CONTAINER" 2>/dev/null || docker kill "$CONTAINER" 2>/dev/null; else [[ -f "$INSTALL_DIR/waf.pid" ]] && kill "$(cat "$INSTALL_DIR/waf.pid")" 2>/dev/null; rm -f "$INSTALL_DIR/waf.pid"; pkill -f "$INSTALL_DIR/waf" 2>/dev/null; fi; ok "已停止"; }
 do_restart() { do_stop 2>/dev/null; sleep 1; do_start; }
 do_status() {
   echo -e "\n  ${C}${B}FoxWAF 状态${N}\n"
