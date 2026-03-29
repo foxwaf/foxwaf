@@ -82,7 +82,11 @@ _compose_file() {
 do_start() {
     log_step "启动 FoxWAF"
     if is_docker; then
-        cd "$INSTALL_DIR" && docker compose up -d &>/dev/null &
+        if docker inspect "$CONTAINER" &>/dev/null; then
+            docker start "$CONTAINER" &>/dev/null &
+        else
+            cd "$INSTALL_DIR" && docker compose up -d &>/dev/null &
+        fi
         if spinner $! "启动容器"; then
             printf "\r%60s\r" ""
             log_ok "容器已启动"
@@ -107,13 +111,13 @@ do_start() {
 do_stop() {
     log_step "停止 FoxWAF"
     if is_docker; then
-        cd "$INSTALL_DIR" && docker compose down &>/dev/null &
+        docker stop "$CONTAINER" &>/dev/null &
         if spinner $! "停止容器"; then
             printf "\r%60s\r" ""
             log_ok "已停止"
         else
             printf "\r%60s\r" ""
-            docker stop "$CONTAINER" &>/dev/null
+            docker kill "$CONTAINER" &>/dev/null
             log_ok "已停止"
         fi
     else
@@ -558,9 +562,11 @@ do_update() {
                 printf "\r%60s\r" ""
             fi
             _dl "docker-compose.yaml" "${INSTALL_DIR}/docker-compose.yml" "$nv" 2>/dev/null || true
-            do_stop 2>/dev/null
+            cd "$INSTALL_DIR" && docker compose down &>/dev/null || docker stop "$CONTAINER" &>/dev/null || true
+            docker rm "$CONTAINER" &>/dev/null || true
             echo "$nv" > "${INSTALL_DIR}/.version"
-            do_start
+            cd "$INSTALL_DIR" && docker compose up -d &>/dev/null &
+            spinner $! "启动新版本" && printf "\r%60s\r" ""
             _gap
             log_ok "更新完成  ${DM}${cv} → ${G}${B}${nv}${N}"
         else
