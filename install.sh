@@ -17,6 +17,8 @@ MIRRORS_GITHUB="https://github.com/kabubu/foxwaf"
 MIRRORS_GITCODE="https://gitcode.com/kabubu/foxwaf"
 MIRRORS_GITEE="https://gitee.com/kabubu/foxwaf"
 MIRRORS_GITLAB="https://gitlab.com/kabubu/foxwaf"
+# Docker Hub 镜像名（与 release.sh 推送一致）；可用环境变量覆盖: FOXWAF_DOCKERHUB_IMAGE=myuser/foxwaf
+MIRRORS_DOCKERHUB_IMAGE="${FOXWAF_DOCKERHUB_IMAGE:-loveyoudocker/foxwaf}"
 
 # 公网 DNS 解析后走 --resolve，减轻本地 DNS 污染导致的下载失败
 DNS_SERVERS=(8.8.8.8 223.5.5.5)
@@ -164,7 +166,7 @@ show_help() {
     install.sh [选项]
 
   ${BOLD}选项${RESET}
-    --mirror NAME    首选镜像源 ${DIM}(github|gitcode|gitee|gitlab)${RESET}
+    --mirror NAME    首选镜像源 ${DIM}(github|gitcode|gitee|gitlab|dockerhub)${RESET}
     --version VER    指定版本号 ${DIM}(默认: 最新)${RESET}
     --dir PATH       安装目录 ${DIM}(默认: /data/foxwaf)${RESET}
     --no-start       安装后不自动启动
@@ -270,7 +272,7 @@ build_url() {
     esac
 }
 
-MIRROR_ORDER=(gitcode github gitee gitlab)
+MIRROR_ORDER=(gitcode github gitee gitlab dockerhub)
 
 get_repo() {
     case "$1" in
@@ -278,6 +280,7 @@ get_repo() {
         gitcode) echo "$MIRRORS_GITCODE" ;;
         gitee)   echo "$MIRRORS_GITEE" ;;
         gitlab)  echo "$MIRRORS_GITLAB" ;;
+        dockerhub) echo "" ;;
     esac
 }
 
@@ -323,6 +326,53 @@ verify_md5() {
     [[ "$expected" == "$actual" ]]
 }
 
+# 从 Docker Hub 拉取 foxwaf 镜像并打 tag 为 kabubu/foxwaf:<ver>（与 compose 一致）
+_pull_foxwaf_from_dockerhub() {
+    local ver="$1" src="${MIRRORS_DOCKERHUB_IMAGE}:${ver}" dst="kabubu/foxwaf:${ver}" attempt
+    for attempt in 1 2 3; do
+        log_dim "尝试 docker pull ${src} (${attempt}/3)..."
+        if docker pull "$src"; then
+            docker tag "$src" "$dst" 2>/dev/null || true
+            log_ok "已从 Docker Hub 拉取并标记为 ${dst}"
+            return 0
+        fi
+        [[ "$attempt" -lt 3 ]] && sleep $((attempt * 2))
+    done
+    return 1
+}
+
+# 按 MIRROR_ORDER 依次尝试：Git 附件 tar 下载 → 服务端 tar → Docker Hub pull
+download_foxwaf_image_bundle() {
+    local tmp="$1" ver="$2" m repo url
+    build_mirror_order
+    for m in "${ORDERED_MIRRORS[@]}"; do
+        if [[ "$m" == "dockerhub" ]]; then
+            if _pull_foxwaf_from_dockerhub "$ver"; then
+                log_dim "来源: dockerhub (${MIRRORS_DOCKERHUB_IMAGE})"
+                return 2
+            fi
+            continue
+        fi
+        repo=$(get_repo "$m")
+        [[ -z "$repo" ]] && continue
+        url=$(build_url "$repo" "$ver" "foxwaf-image.tar.gz" "$m")
+        if download_with_progress "$url" "${tmp}/image.tar.gz" "Docker 镜像"; then
+            log_dim "来源: $m"
+            return 0
+        fi
+    done
+    local fb="${SERVER_DOWNLOAD}/${ver}/foxwaf-image.tar.gz"
+    if download_with_progress "$fb" "${tmp}/image.tar.gz" "Docker 镜像(服务端)"; then
+        log_dim "来源: 服务端(兜底)"
+        return 0
+    fi
+    if _pull_foxwaf_from_dockerhub "$ver"; then
+        log_dim "来源: dockerhub (${MIRRORS_DOCKERHUB_IMAGE}) 兜底"
+        return 2
+    fi
+    return 1
+}
+
 # ─── Docker 模式安装 ─────────────────────────────────────────────────────────
 install_docker() {
     log_step "下载 (Docker 模式)"
@@ -334,22 +384,30 @@ install_docker() {
     local tmp; tmp=$(mktemp -d)
     trap "rm -rf '$tmp'" EXIT
 
-    download_file "foxwaf-image.tar.gz" "$tmp/image.tar.gz" "$VERSION" "Docker 镜像" || die "镜像下载失败"
-    download_file "foxwaf-image.tar.gz.md5" "$tmp/image.md5" "$VERSION" "镜像校验" || true
+    local dlrc
+    download_foxwaf_image_bundle "$tmp" "$VERSION"
+    dlrc=$?
+    [[ "$dlrc" -eq 1 ]] && die "镜像获取失败（Git 附件、服务端与 Docker Hub 均不可用）"
 
-    if [[ -f "$tmp/image.md5" ]]; then
-        if verify_md5 "$tmp/image.tar.gz" "$tmp/image.md5"; then
-            log_ok "MD5 校验通过"
-        else
-            die "镜像 MD5 校验失败，文件可能损坏"
+    if [[ "$dlrc" -eq 2 ]]; then
+        log_ok "使用 Docker Hub 镜像，跳过 tar 导入"
+    else
+        download_file "foxwaf-image.tar.gz.md5" "$tmp/image.md5" "$VERSION" "镜像校验" || true
+
+        if [[ -f "$tmp/image.md5" ]]; then
+            if verify_md5 "$tmp/image.tar.gz" "$tmp/image.md5"; then
+                log_ok "MD5 校验通过"
+            else
+                die "镜像 MD5 校验失败，文件可能损坏"
+            fi
         fi
-    fi
 
-    log_step "导入镜像"
-    docker load -i "$tmp/image.tar.gz" &
-    spinner $! "正在导入 Docker 镜像"
-    echo ""
-    log_ok "Docker 镜像已导入"
+        log_step "导入镜像"
+        docker load -i "$tmp/image.tar.gz" &
+        spinner $! "正在导入 Docker 镜像"
+        echo ""
+        log_ok "Docker 镜像已导入"
+    fi
 
     log_step "配置"
     cat > "$INSTALL_DIR/docker-compose.yml" << DEOF
