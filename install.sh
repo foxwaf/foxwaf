@@ -18,6 +18,29 @@ MIRRORS_GITCODE="https://gitcode.com/kabubu/foxwaf"
 MIRRORS_GITEE="https://gitee.com/kabubu/foxwaf"
 MIRRORS_GITLAB="https://gitlab.com/kabubu/foxwaf"
 
+# 公网 DNS 解析后走 --resolve，减轻本地 DNS 污染导致的下载失败
+DNS_SERVERS=(8.8.8.8 223.5.5.5)
+declare -a CURL_DNS_ARGS=()
+
+prepare_curl_dns() {
+    CURL_DNS_ARGS=()
+    local url="$1" host ip d
+    [[ "$url" != http://* && "$url" != https://* ]] && return 0
+    host="${url#*://}"
+    host="${host%%/*}"
+    host="${host%%:*}"
+    [[ -z "$host" || "$host" == "$url" ]] && return 0
+    ip=""
+    if command -v dig &>/dev/null; then
+        for d in "${DNS_SERVERS[@]}"; do
+            ip=$(dig +short "$host" @"$d" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            [[ -n "$ip" ]] && break
+        done
+    fi
+    [[ -z "$ip" ]] && return 0
+    CURL_DNS_ARGS=(--resolve "${host}:443:${ip}" --resolve "${host}:80:${ip}")
+}
+
 # ─── 颜色 & 符号 ────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
 BLUE='\033[0;34m'; MAGENTA='\033[0;35m'; BOLD='\033[1m'; DIM='\033[2m'
@@ -62,44 +85,44 @@ progress_bar() {
 
 download_with_progress() {
     local url="$1" dest="$2" label="${3:-下载中}"
-    local tmpfile="${dest}.tmp"
-    local total_size
-    total_size=$(curl -sI -L "$url" 2>/dev/null | grep -i content-length | tail -1 | awk '{print $2}' | tr -d '\r') || true
+    local tmpfile="${dest}.tmp" attempt total_size dl_pid cur_size ret
+    prepare_curl_dns "$url"
+    for attempt in 1 2 3; do
+        rm -f "$tmpfile"
+        total_size=$(curl -sI -L "${CURL_DNS_ARGS[@]}" "$url" 2>/dev/null | grep -i content-length | tail -1 | awk '{print $2}' | tr -d '\r') || true
 
-    if [[ -n "$total_size" && "$total_size" -gt 0 ]] 2>/dev/null; then
-        curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
-        local dl_pid=$!
-        while kill -0 "$dl_pid" 2>/dev/null; do
-            if [[ -f "$tmpfile" ]]; then
-                local cur_size
-                cur_size=$(stat -c%s "$tmpfile" 2>/dev/null || echo 0)
-                progress_bar "$cur_size" "$total_size" "$label"
+        if [[ -n "$total_size" && "$total_size" -gt 0 ]] 2>/dev/null; then
+            curl -fSL --connect-timeout 15 --max-time 600 "${CURL_DNS_ARGS[@]}" -o "$tmpfile" "$url" 2>/dev/null &
+            dl_pid=$!
+            while kill -0 "$dl_pid" 2>/dev/null; do
+                if [[ -f "$tmpfile" ]]; then
+                    cur_size=$(stat -c%s "$tmpfile" 2>/dev/null || echo 0)
+                    progress_bar "$cur_size" "$total_size" "$label"
+                fi
+                sleep 0.3
+            done
+            wait "$dl_pid" 2>/dev/null
+            ret=$?
+            if [[ $ret -eq 0 ]]; then
+                progress_bar "$total_size" "$total_size" "$label"
+                echo ""
+                mv "$tmpfile" "$dest"
+                return 0
             fi
-            sleep 0.3
-        done
-        wait "$dl_pid" 2>/dev/null
-        local ret=$?
-        if [[ $ret -eq 0 ]]; then
-            progress_bar "$total_size" "$total_size" "$label"
-            echo ""
-            mv "$tmpfile" "$dest"
-            return 0
         else
-            rm -f "$tmpfile"
-            return 1
-        fi
-    else
-        curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
-        spinner $! "$label"
-        local ret=$?
-        if [[ $ret -eq 0 && -f "$tmpfile" ]]; then
-            echo ""
-            mv "$tmpfile" "$dest"
-            return 0
+            curl -fSL --connect-timeout 15 --max-time 600 "${CURL_DNS_ARGS[@]}" -o "$tmpfile" "$url" 2>/dev/null &
+            spinner $! "$label"
+            ret=$?
+            if [[ $ret -eq 0 && -f "$tmpfile" ]]; then
+                echo ""
+                mv "$tmpfile" "$dest"
+                return 0
+            fi
         fi
         rm -f "$tmpfile"
-        return 1
-    fi
+        [[ "$attempt" -lt 3 ]] && sleep $((attempt * 2))
+    done
+    return 1
 }
 
 # ─── Banner ──────────────────────────────────────────────────────────────────
@@ -210,10 +233,16 @@ detect_mode() {
 fetch_version() {
     [[ "$VERSION" != "latest" ]] && return
     log_step "获取最新版本"
-    local resp
-    resp=$(curl -s --connect-timeout 10 -X POST "$SERVER_API" \
-        -H "Content-Type: application/json" \
-        -d '{"currentVersion":"0.0.0"}' 2>/dev/null) || true
+    local resp attempt
+    resp=""
+    for attempt in 1 2 3; do
+        prepare_curl_dns "$SERVER_API"
+        resp=$(curl -s --connect-timeout 10 "${CURL_DNS_ARGS[@]}" -X POST "$SERVER_API" \
+            -H "Content-Type: application/json" \
+            -d '{"currentVersion":"0.0.0"}' 2>/dev/null) || true
+        [[ -n "$resp" ]] && break
+        sleep $((attempt * 2))
+    done
     if [[ -n "$resp" ]]; then
         local ver
         ver=$(echo "$resp" | grep -oP '"version"\s*:\s*"[^"]*"' | head -1 | grep -oP '"[^"]*"$' | tr -d '"')
@@ -333,6 +362,7 @@ services:
     volumes:
       - ./conf.yaml:/app/conf.yaml
       - ./data:/app/data
+      - ./waf.db:/app/waf.db
     environment:
       - TZ=Asia/Shanghai
       - SERVER=1
@@ -345,6 +375,7 @@ DEOF
     log_ok "Compose 配置已生成"
 
     create_config
+    touch "${INSTALL_DIR}/waf.db"
     echo "$VERSION" > "$INSTALL_DIR/.version"
     install_foxwaf_bin
 
@@ -356,7 +387,7 @@ DEOF
         spinner $! "正在启动 FoxWAF"
         echo ""
         sleep 1
-        if docker ps --filter "name=foxwaf" --format '{{.Status}}' 2>/dev/null | grep -qi "up"; then
+        if docker inspect foxwaf &>/dev/null && [[ "$(docker inspect foxwaf --format '{{.State.Running}}' 2>/dev/null)" == "true" ]]; then
             log_ok "FoxWAF 运行中"
         else
             log_warn "容器可能未正常启动，请检查: foxwaf logs"
@@ -403,10 +434,15 @@ install_foxwaf_bin() {
     fi
 
     if [[ "$ok" != "true" ]]; then
+        local u try
         for u in "https://raw.githubusercontent.com/kabubu/foxwaf/main/foxwaf" "https://gitee.com/kabubu/foxwaf/raw/main/foxwaf"; do
-            if curl -fsSL --connect-timeout 8 -o "$tmp" "$u" 2>/dev/null && head -1 "$tmp" | grep -q '^#!/bin/bash'; then
-                cp "$tmp" "$FOXWAF_BIN"; ok=true; break
-            fi
+            for try in 1 2 3; do
+                prepare_curl_dns "$u"
+                if curl -fsSL --connect-timeout 8 "${CURL_DNS_ARGS[@]}" -o "$tmp" "$u" 2>/dev/null && head -1 "$tmp" | grep -q '^#!/bin/bash'; then
+                    cp "$tmp" "$FOXWAF_BIN"; ok=true; break 2
+                fi
+                [[ "$try" -lt 3 ]] && sleep $((try * 2))
+            done
         done
     fi
 
@@ -433,8 +469,11 @@ do_status() {
   [[ -f "$INSTALL_DIR/.version" ]] && echo -e "  版本  $(cat "$INSTALL_DIR/.version")"
   echo -e "  目录  $INSTALL_DIR"
   if is_docker; then echo -e "  模式  Docker"
-    local s; s=$(docker ps --filter "name=$CONTAINER" --format '{{.Status}}' 2>/dev/null)
-    if echo "$s" | grep -qi up; then echo -e "  状态  ${G}运行中${N}"; docker ps --filter "name=$CONTAINER" --format '  容器  {{.ID}}  {{.RunningFor}}' 2>/dev/null
+    if ! docker inspect "$CONTAINER" &>/dev/null; then echo -e "  状态  ${Y}容器不存在${N}"
+    elif [[ "$(docker inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null)" == "true" ]]; then
+      local _cid _up; _cid=$(docker inspect "$CONTAINER" --format '{{.Id}}' 2>/dev/null)
+      _up=$(docker ps --no-trunc --filter "id=${_cid}" --format '{{.RunningFor}}' 2>/dev/null | head -1)
+      echo -e "  状态  ${G}运行中${N}"; echo -e "  容器  $(echo "$_cid" | cut -c1-12)  ${_up}"
     else echo -e "  状态  ${R}已停止${N}"; fi
   else echo -e "  模式  裸机"
     local p=""; [[ -f "$INSTALL_DIR/waf.pid" ]] && p=$(cat "$INSTALL_DIR/waf.pid")

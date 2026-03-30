@@ -5,7 +5,7 @@
 
 set -o pipefail
 
-INSTALL_DIR="/data/foxwaf"
+INSTALL_DIR="${FOXWAF_INSTALL_DIR:-/data/foxwaf}"
 CONTAINER="foxwaf"
 FOXWAF_SERVER="${FOXWAF_SERVER:-server.foxwaf.cn}"
 
@@ -68,6 +68,16 @@ confirm() {
 }
 
 is_docker() { [[ -f "${INSTALL_DIR}/docker-compose.yml" || -f "${INSTALL_DIR}/docker-compose.yaml" ]]; }
+
+# 旧版 compose 未挂载 waf.db 时数据库只在容器层，备份会丢；导入后补齐挂载行
+_ensure_compose_db_volume() {
+    local f="${INSTALL_DIR}/docker-compose.yml"
+    [[ ! -f "$f" ]] && f="${INSTALL_DIR}/docker-compose.yaml"
+    [[ ! -f "$f" ]] && return 0
+    grep -q 'waf\.db:/app/waf\.db' "$f" 2>/dev/null && return 0
+    grep -q '\./data:/app/data' "$f" || return 0
+    sed -i '/\.\/data:\/app\/data/a\      - ./waf.db:/app/waf.db' "$f" 2>/dev/null || true
+}
 
 _compose_file() {
     if [[ -f "${INSTALL_DIR}/docker-compose.yml" ]]; then echo "${INSTALL_DIR}/docker-compose.yml"
@@ -178,23 +188,25 @@ do_status() {
     [[ -z "$port" ]] && port=8088
 
     if is_docker; then
-        local raw
-        raw=$(docker ps --filter "name=${CONTAINER}" --format '{{.Status}}|{{.ID}}' 2>/dev/null)
-        if [[ -n "$raw" ]] && echo "$raw" | grep -qi "up"; then
+        # 必须用精确容器名 inspect，不能用 ps --filter name=（子串匹配会误报其它容器）
+        if ! docker inspect "$CONTAINER" &>/dev/null; then
+            running=false; state_txt="容器不存在"; state_color="$Y"
+        elif [[ "$(docker inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null)" == "true" ]]; then
+            local _cid_full
+            _cid_full=$(docker inspect "$CONTAINER" --format '{{.Id}}' 2>/dev/null)
             running=true; state_txt="Running"; state_color="$G"
-            container_id=$(echo "$raw" | cut -d'|' -f2)
-            uptime=$(docker ps --filter "name=${CONTAINER}" --format '{{.RunningFor}}' 2>/dev/null)
+            container_id=$(echo "$_cid_full" | cut -c1-12)
+            uptime=$(docker ps --no-trunc --filter "id=${_cid_full}" --format '{{.RunningFor}}' 2>/dev/null | head -1)
+            [[ -z "$uptime" ]] && uptime=$(docker inspect "$CONTAINER" --format '{{.State.Status}}' 2>/dev/null)
             img_name=$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)
             img_size=$(docker image inspect "$img_name" --format '{{.Size}}' 2>/dev/null)
             [[ -n "$img_size" ]] && img_size=$(_human_bytes "$img_size")
 
             waf_pid=$(docker inspect "$CONTAINER" --format '{{.State.Pid}}' 2>/dev/null)
 
-            local cid_full
-            cid_full=$(docker inspect "$CONTAINER" --format '{{.Id}}' 2>/dev/null)
             local cg_base=""
-            for _p in "/sys/fs/cgroup/system.slice/docker-${cid_full}.scope" \
-                      "/sys/fs/cgroup/docker/${cid_full}"; do
+            for _p in "/sys/fs/cgroup/system.slice/docker-${_cid_full}.scope" \
+                      "/sys/fs/cgroup/docker/${_cid_full}"; do
                 [[ -d "$_p" ]] && { cg_base="$_p"; break; }
             done
 
@@ -254,6 +266,10 @@ do_status() {
                     net_tx_str=$(echo "$net_io" | cut -d'/' -f2)
                 fi
             fi
+        else
+            running=false; state_txt="Stopped"; state_color="$R"
+            container_id=$(docker inspect "$CONTAINER" --format '{{.Id}}' 2>/dev/null | cut -c1-12)
+            img_name=$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)
         fi
     else
         [[ -f "${INSTALL_DIR}/waf.pid" ]] && waf_pid=$(cat "${INSTALL_DIR}/waf.pid")
@@ -308,6 +324,9 @@ do_status() {
     printf "  ${C}${B}▎${N} ${W}${B}SERVICE${N}\n"
     _gap
     printf "    ${DM}Status${N}      ${state_color}●${N} ${state_color}${B}${state_txt}${N}\n"
+    if is_docker && [[ "$state_txt" == "容器不存在" ]]; then
+        printf "    ${DM}说明${N}        ${DM}compose 在但容器已删；start 将重新创建${N}\n"
+    fi
     printf "    ${DM}Version${N}     ${B}${ver}${N}\n"
     printf "    ${DM}Mode${N}        ${W}${mode}${N}\n"
     [[ -n "$uptime" ]] && \
@@ -390,9 +409,31 @@ do_export() {
     for d in data certificates plugins; do
         [[ -d "${INSTALL_DIR}/${d}" ]] && cp -a "${INSTALL_DIR}/${d}" "$tmp/"
     done
+    shopt -s nullglob
     for db in "${INSTALL_DIR}"/*.db; do
         [[ -f "$db" ]] && cp -a "$db" "$tmp/"
     done
+    shopt -u nullglob
+
+    # 未挂载 waf.db 时库文件在容器内，从容器拷出以免备份为空
+    if is_docker && docker inspect "$CONTAINER" &>/dev/null; then
+        local _cdb _hs _cs
+        docker cp "${CONTAINER}:/app/waf.db" "${tmp}/.waf.db.container" 2>/dev/null || true
+        if [[ -f "${tmp}/.waf.db.container" ]]; then
+            _hs=0; _cs=$(stat -c%s "${tmp}/.waf.db.container" 2>/dev/null || echo 0)
+            [[ -f "${tmp}/waf.db" ]] && _hs=$(stat -c%s "${tmp}/waf.db" 2>/dev/null || echo 0)
+            if (( _cs > _hs )); then
+                cp -a "${tmp}/.waf.db.container" "${tmp}/waf.db"
+            elif [[ ! -f "${tmp}/waf.db" ]] && (( _cs > 0 )); then
+                cp -a "${tmp}/.waf.db.container" "${tmp}/waf.db"
+            fi
+            rm -f "${tmp}/.waf.db.container"
+        fi
+        docker exec "$CONTAINER" sh -c 'ls /app/data/*.db 2>/dev/null' 2>/dev/null | while read -r _cdb; do
+            [[ -z "$_cdb" ]] && continue
+            docker cp "${CONTAINER}:${_cdb}" "${tmp}/$(basename "$_cdb")" 2>/dev/null || true
+        done
+    fi
 
     if is_docker; then
         log_dim "导出 Docker 镜像（可能较慢）..."
@@ -443,6 +484,10 @@ do_import() {
     done
     shopt -u dotglob
 
+    _ensure_compose_db_volume
+    mkdir -p "${INSTALL_DIR}/data"
+    [[ -f "${INSTALL_DIR}/waf.db" ]] || touch "${INSTALL_DIR}/waf.db"
+
     if [[ -f "${tmp}/docker-image.tar" ]]; then
         docker load -i "${tmp}/docker-image.tar" &>/dev/null &
         if spinner $! "导入镜像"; then
@@ -470,6 +515,27 @@ MIRRORS_GITCODE="https://gitcode.com/kabubu/foxwaf"
 MIRRORS_GITEE="https://gitee.com/kabubu/foxwaf"
 MIRRORS_GITLAB="https://gitlab.com/kabubu/foxwaf"
 
+_FW_DNS=(8.8.8.8 223.5.5.5)
+declare -a _FW_CURL_DNS=()
+_fw_prepare_dns() {
+    _FW_CURL_DNS=()
+    local url="$1" host ip d
+    [[ "$url" != http://* && "$url" != https://* ]] && return 0
+    host="${url#*://}"
+    host="${host%%/*}"
+    host="${host%%:*}"
+    [[ -z "$host" || "$host" == "$url" ]] && return 0
+    ip=""
+    if command -v dig &>/dev/null; then
+        for d in "${_FW_DNS[@]}"; do
+            ip=$(dig +short "$host" @"$d" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+            [[ -n "$ip" ]] && break
+        done
+    fi
+    [[ -z "$ip" ]] && return 0
+    _FW_CURL_DNS=(--resolve "${host}:443:${ip}" --resolve "${host}:80:${ip}")
+}
+
 _build_url() {
     local repo="$1" ver="$2" file="$3" plat="$4" tag="v${ver}"
     case "$plat" in
@@ -482,9 +548,9 @@ _build_url() {
 
 _dl() {
     local file="$1" dest="$2" ver="$3"
-    local mirrors=(gitcode github gitee gitlab)
+    local mirrors=(gitcode github gitee gitlab) m repo url try
     for m in "${mirrors[@]}"; do
-        local repo=""
+        repo=""
         case $m in
             github)  repo="$MIRRORS_GITHUB" ;;
             gitcode) repo="$MIRRORS_GITCODE" ;;
@@ -492,17 +558,25 @@ _dl() {
             gitlab)  repo="$MIRRORS_GITLAB" ;;
         esac
         [[ -z "$repo" ]] && continue
-        local url; url=$(_build_url "$repo" "$ver" "$file" "$m")
-        if curl -fSL --connect-timeout 15 --max-time 300 -o "$dest" "$url" 2>/dev/null; then
-            log_dim "来源: ${m}"
-            return 0
-        fi
+        url=$(_build_url "$repo" "$ver" "$file" "$m")
+        for try in 1 2 3; do
+            _fw_prepare_dns "$url"
+            if curl -fSL --connect-timeout 15 --max-time 300 "${_FW_CURL_DNS[@]}" -o "$dest" "$url" 2>/dev/null; then
+                log_dim "来源: ${m}"
+                return 0
+            fi
+            [[ "$try" -lt 3 ]] && sleep $((try * 2))
+        done
     done
     local fb="http://${FOXWAF_SERVER}:8080/release/${ver}/${file}"
-    if curl -fSL --connect-timeout 15 --max-time 300 -o "$dest" "$fb" 2>/dev/null; then
-        log_dim "来源: 服务端直连"
-        return 0
-    fi
+    for try in 1 2 3; do
+        _fw_prepare_dns "$fb"
+        if curl -fSL --connect-timeout 15 --max-time 300 "${_FW_CURL_DNS[@]}" -o "$dest" "$fb" 2>/dev/null; then
+            log_dim "来源: 服务端直连"
+            return 0
+        fi
+        [[ "$try" -lt 3 ]] && sleep $((try * 2))
+    done
     return 1
 }
 
@@ -522,7 +596,9 @@ do_update() {
     log_dim "当前版本: ${cv}"
 
     local resp
-    resp=$(curl -s --connect-timeout 10 -X POST "http://${FOXWAF_SERVER}:8080/api/update/check" \
+    local _uc="http://${FOXWAF_SERVER}:8080/api/update/check"
+    _fw_prepare_dns "$_uc"
+    resp=$(curl -s --connect-timeout 10 "${_FW_CURL_DNS[@]}" -X POST "$_uc" \
         -H "Content-Type: application/json" \
         -d "{\"currentVersion\":\"${cv}\"}" 2>/dev/null) || true
     [[ -z "$resp" ]] && { log_err "无法连接更新服务器"; return 1; }
