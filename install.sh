@@ -410,6 +410,7 @@ install_docker() {
     fi
 
     log_step "配置"
+    mkdir -p "$INSTALL_DIR/data"
     cat > "$INSTALL_DIR/docker-compose.yml" << DEOF
 services:
   foxwaf:
@@ -417,8 +418,10 @@ services:
     container_name: foxwaf
     restart: unless-stopped
     network_mode: host
+    volumes:
+      - ./data:/app/data
 DEOF
-    log_ok "Compose 配置已生成（配置与数据在镜像内 /app，无需挂载）"
+    log_ok "Compose 配置已生成（数据库/授权持久化在 data/ 卷）"
     echo "$VERSION" > "$INSTALL_DIR/.version"
     install_foxwaf_bin
 

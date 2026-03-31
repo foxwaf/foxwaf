@@ -69,14 +69,8 @@ confirm() {
 
 is_docker() { [[ -f "${INSTALL_DIR}/docker-compose.yml" || -f "${INSTALL_DIR}/docker-compose.yaml" ]]; }
 
-# 旧版 compose 仅挂 data 未挂 waf.db 时，导入后补齐挂载行（老备份兼容）
 _ensure_compose_db_volume() {
-    local f="${INSTALL_DIR}/docker-compose.yml"
-    [[ ! -f "$f" ]] && f="${INSTALL_DIR}/docker-compose.yaml"
-    [[ ! -f "$f" ]] && return 0
-    grep -q 'waf\.db:/app/waf\.db' "$f" 2>/dev/null && return 0
-    grep -q '\./data:/app/data' "$f" || return 0
-    sed -i '/\.\/data:\/app\/data/a\      - ./waf.db:/app/waf.db' "$f" 2>/dev/null || true
+    :
 }
 
 # 将 compose 中的 image: 行替换为快照镜像（导入 docker commit 备份后使用）
@@ -522,9 +516,7 @@ do_import() {
     done
     shopt -u dotglob
 
-    _ensure_compose_db_volume
     mkdir -p "${INSTALL_DIR}/data"
-    [[ -f "${INSTALL_DIR}/waf.db" ]] || touch "${INSTALL_DIR}/waf.db"
 
     if [[ -f "${tmp}/docker-image.tar" ]]; then
         docker load -i "${tmp}/docker-image.tar" &>/dev/null &
