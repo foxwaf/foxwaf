@@ -69,7 +69,7 @@ confirm() {
 
 is_docker() { [[ -f "${INSTALL_DIR}/docker-compose.yml" || -f "${INSTALL_DIR}/docker-compose.yaml" ]]; }
 
-# 旧版 compose 未挂载 waf.db 时数据库只在容器层，备份会丢；导入后补齐挂载行
+# 旧版 compose 仅挂 data 未挂 waf.db 时，导入后补齐挂载行（老备份兼容）
 _ensure_compose_db_volume() {
     local f="${INSTALL_DIR}/docker-compose.yml"
     [[ ! -f "$f" ]] && f="${INSTALL_DIR}/docker-compose.yaml"
@@ -77,6 +77,14 @@ _ensure_compose_db_volume() {
     grep -q 'waf\.db:/app/waf\.db' "$f" 2>/dev/null && return 0
     grep -q '\./data:/app/data' "$f" || return 0
     sed -i '/\.\/data:\/app\/data/a\      - ./waf.db:/app/waf.db' "$f" 2>/dev/null || true
+}
+
+# 将 compose 中的 image: 行替换为快照镜像（导入 docker commit 备份后使用）
+_compose_set_image() {
+    local f="$1" img="$2"
+    [[ -f "$f" ]] || return 0
+    grep -q '^[[:space:]]*image:' "$f" 2>/dev/null || return 0
+    sed -i "s|^\([[:space:]]*\)image:.*|\1image: ${img}|" "$f"
 }
 
 _compose_file() {
@@ -403,48 +411,53 @@ do_export() {
     local bf="${bdir}/foxwaf-${ts}.tar.gz"
     local tmp; tmp=$(mktemp -d)
 
-    for f in conf.yaml source.enc waf .version docker-compose.yml docker-compose.yaml; do
-        [[ -f "${INSTALL_DIR}/${f}" ]] && cp -a "${INSTALL_DIR}/${f}" "$tmp/"
-    done
-    for d in data certificates plugins; do
-        [[ -d "${INSTALL_DIR}/${d}" ]] && cp -a "${INSTALL_DIR}/${d}" "$tmp/"
-    done
-    shopt -s nullglob
-    for db in "${INSTALL_DIR}"/*.db; do
-        [[ -f "$db" ]] && cp -a "$db" "$tmp/"
-    done
-    shopt -u nullglob
-
-    # 未挂载 waf.db 时库文件在容器内，从容器拷出以免备份为空
+    # Docker 且容器在：docker commit 当前容器 → save，与容器内文件系统一致（含 waf.db、/app/data 等）
     if is_docker && docker inspect "$CONTAINER" &>/dev/null; then
-        local _cdb _hs _cs
-        docker cp "${CONTAINER}:/app/waf.db" "${tmp}/.waf.db.container" 2>/dev/null || true
-        if [[ -f "${tmp}/.waf.db.container" ]]; then
-            _hs=0; _cs=$(stat -c%s "${tmp}/.waf.db.container" 2>/dev/null || echo 0)
-            [[ -f "${tmp}/waf.db" ]] && _hs=$(stat -c%s "${tmp}/waf.db" 2>/dev/null || echo 0)
-            if (( _cs > _hs )); then
-                cp -a "${tmp}/.waf.db.container" "${tmp}/waf.db"
-            elif [[ ! -f "${tmp}/waf.db" ]] && (( _cs > 0 )); then
-                cp -a "${tmp}/.waf.db.container" "${tmp}/waf.db"
-            fi
-            rm -f "${tmp}/.waf.db.container"
+        local snap_tag="foxwaf/export:${ts}"
+        log_dim "容器快照 docker commit → ${snap_tag}"
+        if ! docker commit -m "foxwaf export ${ts}" "$CONTAINER" "$snap_tag" &>/dev/null; then
+            rm -rf "$tmp"
+            log_err "docker commit 失败"
+            return 1
         fi
-        docker exec "$CONTAINER" sh -c 'ls /app/data/*.db 2>/dev/null' 2>/dev/null | while read -r _cdb; do
-            [[ -z "$_cdb" ]] && continue
-            docker cp "${CONTAINER}:${_cdb}" "${tmp}/$(basename "$_cdb")" 2>/dev/null || true
+        log_dim "docker save 快照（可能较慢）..."
+        if ! docker save "$snap_tag" -o "${tmp}/container-snapshot.tar" 2>/dev/null; then
+            docker rmi "$snap_tag" &>/dev/null || true
+            rm -rf "$tmp"
+            log_err "docker save 失败"
+            return 1
+        fi
+        printf '%s\n' "$snap_tag" > "${tmp}/export-image-tag"
+        for f in docker-compose.yml docker-compose.yaml .version; do
+            [[ -f "${INSTALL_DIR}/${f}" ]] && cp -a "${INSTALL_DIR}/${f}" "$tmp/"
         done
-    fi
+        log_dim "包内: container-snapshot.tar、export-image-tag、compose、.version"
+    else
+        for f in conf.yaml source.enc waf .version docker-compose.yml docker-compose.yaml; do
+            [[ -f "${INSTALL_DIR}/${f}" ]] && cp -a "${INSTALL_DIR}/${f}" "$tmp/"
+        done
+        for d in data certificates plugins; do
+            [[ -d "${INSTALL_DIR}/${d}" ]] && cp -a "${INSTALL_DIR}/${d}" "$tmp/"
+        done
+        shopt -s nullglob
+        for db in "${INSTALL_DIR}"/*.db; do
+            [[ -f "$db" ]] && cp -a "$db" "$tmp/"
+        done
+        shopt -u nullglob
 
-    if is_docker; then
-        log_dim "导出 Docker 镜像（可能较慢）..."
-        local img; img=$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)
-        if [[ -n "$img" ]]; then
-            docker save "$img" -o "${tmp}/docker-image.tar" 2>/dev/null &
-            if spinner $! "打包镜像"; then
-                printf "\r%60s\r" ""
-            else
-                printf "\r%60s\r" ""
-                log_warn "镜像导出失败，配置数据不受影响"
+        if is_docker; then
+            log_warn "容器不存在，无法快照；已备份安装目录内文件"
+            local cf img
+            cf=$(_compose_file)
+            if [[ -n "$cf" ]] && img=$(grep -m1 '^[[:space:]]*image:' "$cf" 2>/dev/null | sed 's/^[[:space:]]*image:[[:space:]]*//;s/[[:space:]]*$//;s/^["'\'']//;s/["'\'']$//'); then
+                log_dim "附加 docker save 基础镜像: ${img}"
+                docker save "$img" -o "${tmp}/docker-image.tar" 2>/dev/null &
+                if ! spinner $! "docker save"; then
+                    printf "\r%60s\r" ""
+                    log_warn "基础镜像导出失败"
+                else
+                    printf "\r%60s\r" ""
+                fi
             fi
         fi
     fi
@@ -476,10 +489,35 @@ do_import() {
     tar -xzf "$bf" -C "$tmp"
     mkdir -p "$INSTALL_DIR"
 
+    # 新备份：docker commit 快照 → load 后让 compose 指向该镜像，容器内文件原样保留
+    if [[ -f "${tmp}/container-snapshot.tar" && -f "${tmp}/export-image-tag" ]]; then
+        local snap_tag
+        snap_tag=$(tr -d '\r\n' <"${tmp}/export-image-tag")
+        log_dim "docker load 容器快照..."
+        if ! docker load -i "${tmp}/container-snapshot.tar" &>/dev/null; then
+            rm -rf "$tmp"
+            log_err "快照 docker load 失败"
+            return 1
+        fi
+        [[ -f "${tmp}/docker-compose.yml" ]] && cp -a "${tmp}/docker-compose.yml" "${INSTALL_DIR}/"
+        [[ -f "${tmp}/docker-compose.yaml" ]] && cp -a "${tmp}/docker-compose.yaml" "${INSTALL_DIR}/"
+        [[ -f "${tmp}/.version" ]] && cp -a "${tmp}/.version" "${INSTALL_DIR}/"
+        docker rm -f "$CONTAINER" 2>/dev/null || true
+        _compose_set_image "${INSTALL_DIR}/docker-compose.yml" "$snap_tag"
+        _compose_set_image "${INSTALL_DIR}/docker-compose.yaml" "$snap_tag"
+        rm -rf "$tmp"
+        log_ok "已从容器快照恢复  ${DM}image: ${snap_tag}${N}"
+        _gap
+        do_start
+        return 0
+    fi
+
     shopt -s dotglob
     for item in "$tmp"/*; do
         local name; name=$(basename "$item")
         [[ "$name" == "docker-image.tar" ]] && continue
+        [[ "$name" == "container-snapshot.tar" ]] && continue
+        [[ "$name" == "export-image-tag" ]] && continue
         cp -a "$item" "${INSTALL_DIR}/"
     done
     shopt -u dotglob
@@ -702,8 +740,8 @@ show_help() {
     printf "  ${C}${B}维护${N}\n"
     _gap
     printf "    ${W}update${N}      ${DM}检查并安装更新${N}\n"
-    printf "    ${W}export${N}      ${DM}备份配置与数据${N}\n"
-    printf "    ${W}import${N}      ${DM}从备份恢复 ${DM}[foxwaf import <file>]${N}\n"
+    printf "    ${W}export${N}      ${DM}Docker：容器快照（docker commit+save）；裸机：目录文件${N}\n"
+    printf "    ${W}import${N}      ${DM}恢复备份 ${DM}[foxwaf import <file>]${N}\n"
     printf "    ${W}uninstall${N}   ${DM}卸载 FoxWAF${N}\n"
     printf "    ${W}version${N}     ${DM}显示版本号${N}\n"
     _gap
