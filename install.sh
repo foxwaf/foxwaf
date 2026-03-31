@@ -417,23 +417,8 @@ services:
     container_name: foxwaf
     restart: unless-stopped
     network_mode: host
-    volumes:
-      - ./conf.yaml:/app/conf.yaml
-      - ./data:/app/data
-      - ./waf.db:/app/waf.db
-    environment:
-      - TZ=Asia/Shanghai
-      - SERVER=1
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
 DEOF
-    log_ok "Compose 配置已生成"
-
-    create_config
-    touch "${INSTALL_DIR}/waf.db"
+    log_ok "Compose 配置已生成（配置与数据在镜像内 /app，无需挂载）"
     echo "$VERSION" > "$INSTALL_DIR/.version"
     install_foxwaf_bin
 
@@ -454,32 +439,6 @@ DEOF
 }
 
 # ─── 公共 ────────────────────────────────────────────────────────────────────
-create_config() {
-    [[ -f "$INSTALL_DIR/conf.yaml" ]] && { log_dim "配置文件已存在，跳过"; return; }
-    mkdir -p "$INSTALL_DIR/data"
-    cat > "$INSTALL_DIR/conf.yaml" << 'EOF'
-Database:
-    DBName: waf.db
-Server:
-    Addr: 0.0.0.0
-    CertFile: ""
-    HTTPRedirectPort: 0
-    HTTPS: false
-    KeyFile: ""
-    Port: 8088
-Update:
-    CheckIntervalMinutes: 0
-    IgnoredVersion: ""
-    MaxBackupDays: 0
-    MaxBackupVersions: 0
-    UpdateStrategy: ""
-password: 776cb326ab0cd5f0a974c1b9606044d8485201f2db19cf8e3749bdee5f36e200
-secureentry: fox
-username: fox
-EOF
-    log_ok "默认配置已生成"
-}
-
 install_foxwaf_bin() {
     log_step "安装管理工具"
     local ok=false tmp
@@ -566,8 +525,15 @@ do_uninstall() {
 # ─── 安装完成 ────────────────────────────────────────────────────────────────
 print_success() {
     local port entry
-    port=$(grep -i '^\s*Port:' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1 | awk '{print $2}')
-    entry=$(grep -i '^\s*secureentry:' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1 | awk '{print $2}')
+    if [[ -f "$INSTALL_DIR/conf.yaml" ]]; then
+        port=$(grep -i '^\s*Port:' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1 | awk '{print $2}')
+        entry=$(grep -i '^\s*secureentry:' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1 | awk '{print $2}')
+    elif docker exec foxwaf test -f /app/conf.yaml 2>/dev/null; then
+        port=$(docker exec foxwaf grep -i '^\s*Port:' /app/conf.yaml 2>/dev/null | head -1 | awk '{print $2}' || true)
+        entry=$(docker exec foxwaf grep -i '^\s*secureentry:' /app/conf.yaml 2>/dev/null | head -1 | awk '{print $2}' || true)
+    fi
+    port="${port:-$WAF_DEFAULT_PORT}"
+    entry="${entry:-fox}"
 
     echo ""
     echo -e "  ${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
