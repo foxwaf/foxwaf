@@ -121,18 +121,6 @@ foxwaf uninstall      # 卸载（数据保留）
 foxwaf version        # 当前版本号
 ```
 
----
-
-## 💬 社区交流群
-
-如果你在使用过程中遇到问题，或者想和其他用户交流规则/部署经验，可以加入我们的 QQ 交流群：
-
-<p align="center">
-  <img src="./qq.jpg" alt="FoxWAF QQ 交流群" width="260">
-</p>
-
----
-
 ## 💾 备份与恢复
 
 ```bash
@@ -255,6 +243,16 @@ password: fox
 
 ---
 
+## 💬 社区交流群
+
+如果你在使用过程中遇到问题，或者想和其他用户交流规则/部署经验，可以加入我们的 QQ 交流群：
+
 <p align="center">
-  <sub>Copyright © 2026 FoxWAF · All rights reserved</sub>
+  <img src="./qq.jpg" alt="FoxWAF QQ 交流群" width="260">
+</p>
+
+---
+
+<p align="center">
+  <sub>COPYRIGHT © 2026 FoxWAF · All rights reserved</sub>
 </p>
