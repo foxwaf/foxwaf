@@ -94,7 +94,7 @@ _compose_file() {
 do_start() {
     log_step "启动 FoxWAF"
     if is_docker; then
-        if docker inspect "$CONTAINER" &>/dev/null; then
+        if docker container inspect "$CONTAINER" &>/dev/null; then
             docker start "$CONTAINER" &>/dev/null &
         else
             cd "$INSTALL_DIR" && docker compose up -d &>/dev/null &
@@ -191,20 +191,20 @@ do_status() {
 
     if is_docker; then
         # 必须用精确容器名 inspect，不能用 ps --filter name=（子串匹配会误报其它容器）
-        if ! docker inspect "$CONTAINER" &>/dev/null; then
+        if ! docker container inspect "$CONTAINER" &>/dev/null; then
             running=false; state_txt="容器不存在"; state_color="$Y"
-        elif [[ "$(docker inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null)" == "true" ]]; then
+        elif [[ "$(docker container inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null)" == "true" ]]; then
             local _cid_full
-            _cid_full=$(docker inspect "$CONTAINER" --format '{{.Id}}' 2>/dev/null)
+            _cid_full=$(docker container inspect "$CONTAINER" --format '{{.Id}}' 2>/dev/null)
             running=true; state_txt="Running"; state_color="$G"
             container_id=$(echo "$_cid_full" | cut -c1-12)
             uptime=$(docker ps --no-trunc --filter "id=${_cid_full}" --format '{{.RunningFor}}' 2>/dev/null | head -1)
-            [[ -z "$uptime" ]] && uptime=$(docker inspect "$CONTAINER" --format '{{.State.Status}}' 2>/dev/null)
-            img_name=$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)
+            [[ -z "$uptime" ]] && uptime=$(docker container inspect "$CONTAINER" --format '{{.State.Status}}' 2>/dev/null)
+            img_name=$(docker container inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)
             img_size=$(docker image inspect "$img_name" --format '{{.Size}}' 2>/dev/null)
             [[ -n "$img_size" ]] && img_size=$(_human_bytes "$img_size")
 
-            waf_pid=$(docker inspect "$CONTAINER" --format '{{.State.Pid}}' 2>/dev/null)
+            waf_pid=$(docker container inspect "$CONTAINER" --format '{{.State.Pid}}' 2>/dev/null)
 
             local cg_base=""
             for _p in "/sys/fs/cgroup/system.slice/docker-${_cid_full}.scope" \
@@ -270,8 +270,8 @@ do_status() {
             fi
         else
             running=false; state_txt="Stopped"; state_color="$R"
-            container_id=$(docker inspect "$CONTAINER" --format '{{.Id}}' 2>/dev/null | cut -c1-12)
-            img_name=$(docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)
+            container_id=$(docker container inspect "$CONTAINER" --format '{{.Id}}' 2>/dev/null | cut -c1-12)
+            img_name=$(docker container inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null)
         fi
     else
         [[ -f "${INSTALL_DIR}/waf.pid" ]] && waf_pid=$(cat "${INSTALL_DIR}/waf.pid")
@@ -406,7 +406,7 @@ do_export() {
     local tmp; tmp=$(mktemp -d)
 
     # Docker 且容器在：docker commit 当前容器 → save，与容器内文件系统一致（含 waf.db、/app/data 等）
-    if is_docker && docker inspect "$CONTAINER" &>/dev/null; then
+    if is_docker && docker container inspect "$CONTAINER" &>/dev/null; then
         local snap_tag="foxwaf/export:${ts}"
         log_dim "容器快照 docker commit → ${snap_tag}"
         if ! docker commit -m "foxwaf export ${ts}" "$CONTAINER" "$snap_tag" &>/dev/null; then
@@ -496,6 +496,30 @@ do_import() {
         [[ -f "${tmp}/docker-compose.yml" ]] && cp -a "${tmp}/docker-compose.yml" "${INSTALL_DIR}/"
         [[ -f "${tmp}/docker-compose.yaml" ]] && cp -a "${tmp}/docker-compose.yaml" "${INSTALL_DIR}/"
         [[ -f "${tmp}/.version" ]] && cp -a "${tmp}/.version" "${INSTALL_DIR}/"
+        # Extract data from snapshot to host volumes so compose volume mounts don't override
+        log_dim "从快照中恢复数据文件到宿主机..."
+        local _tmp_ctn="foxwaf-import-tmp-$$"
+        if docker create --name "$_tmp_ctn" "$snap_tag" &>/dev/null; then
+            # Copy conf.yaml if not already on host
+            docker cp "$_tmp_ctn:/app/conf.yaml" "${INSTALL_DIR}/conf.yaml" 2>/dev/null || true
+            # Copy database files
+            docker cp "$_tmp_ctn:/app/waf.db" "${INSTALL_DIR}/waf.db" 2>/dev/null || true
+            # Copy data directory contents
+            mkdir -p "${INSTALL_DIR}/data"
+            docker cp "$_tmp_ctn:/app/data/." "${INSTALL_DIR}/data/" 2>/dev/null || true
+            # Copy auth.enc
+            docker cp "$_tmp_ctn:/app/auth.enc" "${INSTALL_DIR}/auth.enc" 2>/dev/null || true
+            # Copy source.enc
+            docker cp "$_tmp_ctn:/app/source.enc" "${INSTALL_DIR}/source.enc" 2>/dev/null || true
+            # Copy ownrule
+            mkdir -p "${INSTALL_DIR}/ownrule"
+            docker cp "$_tmp_ctn:/app/ownrule/." "${INSTALL_DIR}/ownrule/" 2>/dev/null || true
+            # Copy plugins
+            mkdir -p "${INSTALL_DIR}/plugins"
+            docker cp "$_tmp_ctn:/app/plugins/." "${INSTALL_DIR}/plugins/" 2>/dev/null || true
+            docker rm "$_tmp_ctn" &>/dev/null || true
+            log_ok "数据文件已恢复到宿主机"
+        fi
         docker rm -f "$CONTAINER" 2>/dev/null || true
         _compose_set_image "${INSTALL_DIR}/docker-compose.yml" "$snap_tag"
         _compose_set_image "${INSTALL_DIR}/docker-compose.yaml" "$snap_tag"
