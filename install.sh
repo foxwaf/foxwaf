@@ -13,12 +13,12 @@ SERVER_API="http://${FOXWAF_SERVER}:8080/api/update/check"
 SERVER_DOWNLOAD="http://${FOXWAF_SERVER}:8080/release"
 WAF_DEFAULT_PORT=8088
 
-MIRRORS_GITHUB="https://github.com/kabubu/foxwaf"
+MIRRORS_GITHUB="https://github.com/foxwaf/foxwaf-realese"
 MIRRORS_GITCODE="https://gitcode.com/kabubu/foxwaf"
-MIRRORS_GITEE="https://gitee.com/kabubu/foxwaf"
-MIRRORS_GITLAB="https://gitlab.com/kabubu/foxwaf"
 # Docker Hub 镜像名（与 release.sh 推送一致）；可用环境变量覆盖: FOXWAF_DOCKERHUB_IMAGE=myuser/foxwaf
 MIRRORS_DOCKERHUB_IMAGE="${FOXWAF_DOCKERHUB_IMAGE:-loveyoudocker/foxwaf}"
+# 兜底：GitHub raw（主分支 foxwaf 脚本，与 MIRRORS_GITHUB 仓库一致）
+MIRRORS_GITHUB_RAW_FOXWAF="https://raw.githubusercontent.com/foxwaf/foxwaf-realese/main/foxwaf"
 
 # 公网 DNS 解析后走 --resolve，减轻本地 DNS 污染导致的下载失败
 DNS_SERVERS=(8.8.8.8 223.5.5.5)
@@ -147,7 +147,12 @@ parse_args() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --docker)    MODE="docker"; shift ;;
-            --mirror)    MIRROR="${2:-}"; shift 2 ;;
+            --mirror)    MIRROR="${2:-}"; shift 2
+                case "$MIRROR" in
+                    gitcode|github|dockerhub) ;;
+                    *) die "无效的 --mirror: $MIRROR（仅支持: gitcode|github|dockerhub）" ;;
+                esac
+                ;;
             --version)   VERSION="${2:-}"; shift 2 ;;
             --dir)       INSTALL_DIR="${2:-}"; shift 2 ;;
             --no-start)  NO_START=true; shift ;;
@@ -166,7 +171,7 @@ show_help() {
     install.sh [选项]
 
   ${BOLD}选项${RESET}
-    --mirror NAME    首选镜像源 ${DIM}(github|gitcode|gitee|gitlab|dockerhub)${RESET}
+    --mirror NAME    首选镜像源 ${DIM}(gitcode|github|dockerhub)${RESET}
     --version VER    指定版本号 ${DIM}(默认: 最新)${RESET}
     --dir PATH       安装目录 ${DIM}(默认: /data/foxwaf)${RESET}
     --no-start       安装后不自动启动
@@ -265,21 +270,18 @@ build_url() {
         gitcode)
             local path="${repo#*gitcode.com/}"; path="${path%/}"
             echo "https://api.gitcode.com/api/v5/repos/${path}/releases/${tag}/attach_files/${file}/download" ;;
-        gitlab)
-            echo "${repo}/-/releases/${tag}/downloads/${file}" ;;
         *)
             echo "${repo}/releases/download/${tag}/${file}" ;;
     esac
 }
 
-MIRROR_ORDER=(gitcode github gitee gitlab dockerhub)
+# 顺序：GitCode → GitHub → Docker Hub；各源失败后用服务端 ${SERVER_DOWNLOAD} 兜底（见 download_*）
+MIRROR_ORDER=(gitcode github dockerhub)
 
 get_repo() {
     case "$1" in
         github)  echo "$MIRRORS_GITHUB" ;;
         gitcode) echo "$MIRRORS_GITCODE" ;;
-        gitee)   echo "$MIRRORS_GITEE" ;;
-        gitlab)  echo "$MIRRORS_GITLAB" ;;
         dockerhub) echo "" ;;
     esac
 }
@@ -326,14 +328,13 @@ verify_md5() {
     [[ "$expected" == "$actual" ]]
 }
 
-# 从 Docker Hub 拉取 foxwaf 镜像并打 tag 为 kabubu/foxwaf:<ver>（与 compose 一致）
+# 从 Docker Hub 拉取镜像（compose 直接使用 ${MIRRORS_DOCKERHUB_IMAGE}:<ver>，不再打 kabubu 等别名）
 _pull_foxwaf_from_dockerhub() {
-    local ver="$1" src="${MIRRORS_DOCKERHUB_IMAGE}:${ver}" dst="kabubu/foxwaf:${ver}" attempt
+    local ver="$1" src="${MIRRORS_DOCKERHUB_IMAGE}:${ver}" attempt
     for attempt in 1 2 3; do
         log_dim "尝试 docker pull ${src} (${attempt}/3)..."
         if docker pull "$src"; then
-            docker tag "$src" "$dst" 2>/dev/null || true
-            log_ok "已从 Docker Hub 拉取并标记为 ${dst}"
+            log_ok "已从 Docker Hub 拉取 ${src}"
             return 0
         fi
         [[ "$attempt" -lt 3 ]] && sleep $((attempt * 2))
@@ -406,6 +407,17 @@ install_docker() {
         docker load -i "$tmp/image.tar.gz" &
         spinner $! "正在导入 Docker 镜像"
         echo ""
+        # 发布 tar 内镜像名可能与 Docker Hub 命名空间不一致（如 kabubu/foxwaf），统一到 compose 引用
+        local hub_img="${MIRRORS_DOCKERHUB_IMAGE}:${VERSION}"
+        if ! docker image inspect "$hub_img" &>/dev/null; then
+            local legacy
+            for legacy in "kabubu/foxwaf:${VERSION}"; do
+                if docker image inspect "$legacy" &>/dev/null; then
+                    docker tag "$legacy" "$hub_img" 2>/dev/null && log_dim "已标记镜像: ${legacy} -> ${hub_img}"
+                    break
+                fi
+            done
+        fi
         log_ok "Docker 镜像已导入"
     fi
 
@@ -414,7 +426,7 @@ install_docker() {
     cat > "$INSTALL_DIR/docker-compose.yml" << DEOF
 services:
   foxwaf:
-    image: kabubu/foxwaf:${VERSION}
+    image: ${MIRRORS_DOCKERHUB_IMAGE}:${VERSION}
     container_name: foxwaf
     restart: unless-stopped
     network_mode: host
@@ -455,14 +467,13 @@ install_foxwaf_bin() {
 
     if [[ "$ok" != "true" ]]; then
         local u try
-        for u in "https://raw.githubusercontent.com/kabubu/foxwaf/main/foxwaf" "https://gitee.com/kabubu/foxwaf/raw/main/foxwaf"; do
-            for try in 1 2 3; do
-                prepare_curl_dns "$u"
-                if curl -fsSL --connect-timeout 8 "${CURL_DNS_ARGS[@]}" -o "$tmp" "$u" 2>/dev/null && head -1 "$tmp" | grep -q '^#!/bin/bash'; then
-                    cp "$tmp" "$FOXWAF_BIN"; ok=true; break 2
-                fi
-                [[ "$try" -lt 3 ]] && sleep $((try * 2))
-            done
+        u="$MIRRORS_GITHUB_RAW_FOXWAF"
+        for try in 1 2 3; do
+            prepare_curl_dns "$u"
+            if curl -fsSL --connect-timeout 8 "${CURL_DNS_ARGS[@]}" -o "$tmp" "$u" 2>/dev/null && head -1 "$tmp" | grep -q '^#!/bin/bash'; then
+                cp "$tmp" "$FOXWAF_BIN"; ok=true; break
+            fi
+            [[ "$try" -lt 3 ]] && sleep $((try * 2))
         done
     fi
 
