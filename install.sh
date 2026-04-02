@@ -13,35 +13,15 @@ SERVER_API="http://${FOXWAF_SERVER}:8080/api/update/check"
 SERVER_DOWNLOAD="http://${FOXWAF_SERVER}:8080/release"
 WAF_DEFAULT_PORT=8088
 
-MIRRORS_GITHUB="https://github.com/foxwaf/foxwaf-realese"
-MIRRORS_GITCODE="https://gitcode.com/kabubu/foxwaf"
+MIRRORS_GITHUB="${MIRRORS_GITHUB:-https://github.com/foxwaf/foxwaf-realese}"
+MIRRORS_GITCODE="${MIRRORS_GITCODE:-https://gitcode.com/kabubu/foxwaf}"
 # Docker Hub 镜像名（与 release.sh 推送一致）；可用环境变量覆盖: FOXWAF_DOCKERHUB_IMAGE=myuser/foxwaf
 MIRRORS_DOCKERHUB_IMAGE="${FOXWAF_DOCKERHUB_IMAGE:-loveyoudocker/foxwaf}"
 # 兜底：GitHub raw（主分支 foxwaf 脚本，与 MIRRORS_GITHUB 仓库一致）
 MIRRORS_GITHUB_RAW_FOXWAF="https://raw.githubusercontent.com/foxwaf/foxwaf-realese/main/foxwaf"
 
-# 公网 DNS 解析后走 --resolve，减轻本地 DNS 污染导致的下载失败
-DNS_SERVERS=(8.8.8.8 223.5.5.5)
-declare -a CURL_DNS_ARGS=()
-
-prepare_curl_dns() {
-    CURL_DNS_ARGS=()
-    local url="$1" host ip d
-    [[ "$url" != http://* && "$url" != https://* ]] && return 0
-    host="${url#*://}"
-    host="${host%%/*}"
-    host="${host%%:*}"
-    [[ -z "$host" || "$host" == "$url" ]] && return 0
-    ip=""
-    if command -v dig &>/dev/null; then
-        for d in "${DNS_SERVERS[@]}"; do
-            ip=$(dig +short "$host" @"$d" A 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-            [[ -n "$ip" ]] && break
-        done
-    fi
-    [[ -z "$ip" ]] && return 0
-    CURL_DNS_ARGS=(--resolve "${host}:443:${ip}" --resolve "${host}:80:${ip}")
-}
+# Git 侧下载顺序：由 waf.md5 并行竞速决定（或 --mirror）；不写死 DNS --resolve
+declare -a ORDERED_GIT_MIRRORS=()
 
 # ─── 颜色 & 符号 ────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'
@@ -88,13 +68,12 @@ progress_bar() {
 download_with_progress() {
     local url="$1" dest="$2" label="${3:-下载中}"
     local tmpfile="${dest}.tmp" attempt total_size dl_pid cur_size ret
-    prepare_curl_dns "$url"
     for attempt in 1 2 3; do
         rm -f "$tmpfile"
-        total_size=$(curl -sI -L "${CURL_DNS_ARGS[@]}" "$url" 2>/dev/null | grep -i content-length | tail -1 | awk '{print $2}' | tr -d '\r') || true
+        total_size=$(curl -sI -L "$url" 2>/dev/null | grep -i content-length | tail -1 | awk '{print $2}' | tr -d '\r') || true
 
         if [[ -n "$total_size" && "$total_size" -gt 0 ]] 2>/dev/null; then
-            curl -fSL --connect-timeout 15 --max-time 600 "${CURL_DNS_ARGS[@]}" -o "$tmpfile" "$url" 2>/dev/null &
+            curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
             dl_pid=$!
             while kill -0 "$dl_pid" 2>/dev/null; do
                 if [[ -f "$tmpfile" ]]; then
@@ -112,7 +91,7 @@ download_with_progress() {
                 return 0
             fi
         else
-            curl -fSL --connect-timeout 15 --max-time 600 "${CURL_DNS_ARGS[@]}" -o "$tmpfile" "$url" 2>/dev/null &
+            curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
             spinner $! "$label"
             ret=$?
             if [[ $ret -eq 0 && -f "$tmpfile" ]]; then
@@ -171,7 +150,8 @@ show_help() {
     install.sh [选项]
 
   ${BOLD}选项${RESET}
-    --mirror NAME    首选镜像源 ${DIM}(gitcode|github|dockerhub)${RESET}
+    --mirror NAME    ${DIM}dockerhub${RESET}=跳过 Git；${DIM}gitcode|github${RESET}=固定 Git 顺序（跳过 waf.md5 竞速）
+    ${DIM}默认${RESET}         并行下载 GitCode/GitHub 的 waf.md5，先完成者优先；Git 全失败则 Docker Hub → 服务端${RESET}
     --version VER    指定版本号 ${DIM}(默认: 最新)${RESET}
     --dir PATH       安装目录 ${DIM}(默认: /data/foxwaf)${RESET}
     --no-start       安装后不自动启动
@@ -182,11 +162,16 @@ show_help() {
     ${DIM}# Docker 模式安装${RESET}
     bash install.sh --docker
 
-    ${DIM}# 指定 gitcode 镜像源${RESET}
+    ${DIM}# 指定优先 Git 源（跳过 waf.md5 竞速）${RESET}
     bash install.sh --docker --mirror gitcode
 
     ${DIM}# 安装指定版本到自定义目录${RESET}
     bash install.sh --version 1.0.0 --dir /opt/foxwaf
+
+  ${DIM}环境变量（可选）${RESET}
+    FOXWAF_SERVER              维护服务端主机名 ${DIM}(默认 server.foxwaf.cn)${RESET}
+    FOXWAF_INSTALL_SKIP_GIT=1  跳过 Git 竞速与 Git 下载 ${DIM}(测试服务端链路用)${RESET}
+    MIRRORS_GITHUB / MIRRORS_GITCODE  覆盖仓库根 URL ${DIM}(测试用)${RESET}
 "
 }
 
@@ -243,8 +228,7 @@ fetch_version() {
     local resp attempt
     resp=""
     for attempt in 1 2 3; do
-        prepare_curl_dns "$SERVER_API"
-        resp=$(curl -s --connect-timeout 10 "${CURL_DNS_ARGS[@]}" -X POST "$SERVER_API" \
+        resp=$(curl -s --connect-timeout 10 -X POST "$SERVER_API" \
             -H "Content-Type: application/json" \
             -d '{"currentVersion":"0.0.0"}' 2>/dev/null) || true
         [[ -n "$resp" ]] && break
@@ -275,37 +259,86 @@ build_url() {
     esac
 }
 
-# 顺序：GitCode → GitHub → Docker Hub；各源失败后用服务端 ${SERVER_DOWNLOAD} 兜底（见 download_*）
-MIRROR_ORDER=(gitcode github dockerhub)
-
 get_repo() {
     case "$1" in
         github)  echo "$MIRRORS_GITHUB" ;;
         gitcode) echo "$MIRRORS_GITCODE" ;;
-        dockerhub) echo "" ;;
+        *)       echo "" ;;
     esac
 }
 
-build_mirror_order() {
-    ORDERED_MIRRORS=()
-    if [[ -n "$MIRROR" ]]; then
-        ORDERED_MIRRORS+=("$MIRROR")
+# 并行下载 GitCode / GitHub 的 waf.md5，先成功且时间戳更早者优先；均失败则 ORDERED_GIT_MIRRORS 为空（后续走 Docker Hub → 服务端）
+resolve_git_mirrors() {
+    local ver="$1"
+    ORDERED_GIT_MIRRORS=()
+
+    if [[ "${FOXWAF_INSTALL_SKIP_GIT:-}" == "1" ]]; then
+        log_dim "已设置 FOXWAF_INSTALL_SKIP_GIT=1，跳过 Git 源与竞速"
+        return
     fi
-    for m in "${MIRROR_ORDER[@]}"; do
-        local dup=false
-        for e in "${ORDERED_MIRRORS[@]+"${ORDERED_MIRRORS[@]}"}"; do
-            [[ "$e" == "$m" ]] && dup=true && break
-        done
-        [[ "$dup" == "false" ]] && ORDERED_MIRRORS+=("$m")
-    done
+
+    if [[ "$MIRROR" == "dockerhub" ]]; then
+        log_dim "已指定 --mirror dockerhub，跳过 Git 源与竞速"
+        return
+    fi
+
+    if [[ "$MIRROR" == "gitcode" ]]; then
+        ORDERED_GIT_MIRRORS=(gitcode github)
+        log_dim "Git 下载顺序: gitcode → github（--mirror）"
+        return
+    fi
+
+    if [[ "$MIRROR" == "github" ]]; then
+        ORDERED_GIT_MIRRORS=(github gitcode)
+        log_dim "Git 下载顺序: github → gitcode（--mirror）"
+        return
+    fi
+
+    log_step "探测最快 Git 源（并行下载 waf.md5）"
+    local td url_gc url_gh pid_gc pid_gh tgc tgh
+    td=$(mktemp -d)
+    url_gc=$(build_url "$MIRRORS_GITCODE" "$ver" "waf.md5" "gitcode")
+    url_gh=$(build_url "$MIRRORS_GITHUB" "$ver" "waf.md5" "github")
+    rm -f "$td/ts.gitcode" "$td/ts.github" "$td/waf.md5.gitcode" "$td/waf.md5.github"
+    # 并行拉取，成功后写入单调时间戳（纳秒优先，否则秒）
+    ( curl -fSL --connect-timeout 12 --max-time 300 -o "$td/waf.md5.gitcode" "$url_gc" 2>/dev/null && { date +%s%N 2>/dev/null || date +%s; } > "$td/ts.gitcode" ) || true &
+    pid_gc=$!
+    ( curl -fSL --connect-timeout 12 --max-time 300 -o "$td/waf.md5.github" "$url_gh" 2>/dev/null && { date +%s%N 2>/dev/null || date +%s; } > "$td/ts.github" ) || true &
+    pid_gh=$!
+    wait "$pid_gc" 2>/dev/null || true
+    wait "$pid_gh" 2>/dev/null || true
+
+    tgc=""; tgh=""
+    [[ -f "$td/ts.gitcode" && -s "$td/waf.md5.gitcode" ]] && tgc=$(tr -d '\n' < "$td/ts.gitcode")
+    [[ -f "$td/ts.github" && -s "$td/waf.md5.github" ]] && tgh=$(tr -d '\n' < "$td/ts.github")
+    rm -rf "$td"
+
+    if [[ -n "$tgc" && -n "$tgh" ]]; then
+        if [[ "$tgc" -le "$tgh" ]]; then
+            ORDERED_GIT_MIRRORS=(gitcode github)
+            log_ok "更快源: GitCode（waf.md5 先完成）"
+        else
+            ORDERED_GIT_MIRRORS=(github gitcode)
+            log_ok "更快源: GitHub（waf.md5 先完成）"
+        fi
+    elif [[ -n "$tgc" ]]; then
+        ORDERED_GIT_MIRRORS=(gitcode github)
+        log_ok "可用源: GitCode（GitHub 未成功）"
+    elif [[ -n "$tgh" ]]; then
+        ORDERED_GIT_MIRRORS=(github gitcode)
+        log_ok "可用源: GitHub（GitCode 未成功）"
+    else
+        log_warn "GitCode/GitHub 均未成功下载 waf.md5，将尝试 Docker Hub，再使用服务端兜底"
+    fi
 }
 
 download_file() {
     local file="$1" dest="$2" ver="$3" label="${4:-$1}"
-    for m in "${ORDERED_MIRRORS[@]}"; do
-        local repo; repo=$(get_repo "$m")
+    local m repo url
+    for m in "${ORDERED_GIT_MIRRORS[@]}"; do
+        repo=$(get_repo "$m")
         [[ -z "$repo" ]] && continue
-        local url; url=$(build_url "$repo" "$ver" "$file" "$m")
+        url=$(build_url "$repo" "$ver" "$file" "$m")
         if download_with_progress "$url" "$dest" "$label"; then
             log_dim "来源: $m"
             return 0
@@ -342,18 +375,10 @@ _pull_foxwaf_from_dockerhub() {
     return 1
 }
 
-# 按 MIRROR_ORDER 依次尝试：Git 附件 tar 下载 → 服务端 tar → Docker Hub pull
+# Git 附件 tar（按 ORDERED_GIT_MIRRORS）→ Docker Hub pull → 服务端 tar
 download_foxwaf_image_bundle() {
     local tmp="$1" ver="$2" m repo url
-    build_mirror_order
-    for m in "${ORDERED_MIRRORS[@]}"; do
-        if [[ "$m" == "dockerhub" ]]; then
-            if _pull_foxwaf_from_dockerhub "$ver"; then
-                log_dim "来源: dockerhub (${MIRRORS_DOCKERHUB_IMAGE})"
-                return 2
-            fi
-            continue
-        fi
+    for m in "${ORDERED_GIT_MIRRORS[@]}"; do
         repo=$(get_repo "$m")
         [[ -z "$repo" ]] && continue
         url=$(build_url "$repo" "$ver" "foxwaf-image.tar.gz" "$m")
@@ -362,14 +387,14 @@ download_foxwaf_image_bundle() {
             return 0
         fi
     done
+    if _pull_foxwaf_from_dockerhub "$ver"; then
+        log_dim "来源: dockerhub (${MIRRORS_DOCKERHUB_IMAGE})"
+        return 2
+    fi
     local fb="${SERVER_DOWNLOAD}/${ver}/foxwaf-image.tar.gz"
     if download_with_progress "$fb" "${tmp}/image.tar.gz" "Docker 镜像(服务端)"; then
         log_dim "来源: 服务端(兜底)"
         return 0
-    fi
-    if _pull_foxwaf_from_dockerhub "$ver"; then
-        log_dim "来源: dockerhub (${MIRRORS_DOCKERHUB_IMAGE}) 兜底"
-        return 2
     fi
     return 1
 }
@@ -380,7 +405,7 @@ install_docker() {
     [[ "$DOCKER_OK" != "true" ]] && die "Docker 未安装，请先安装: curl -fsSL https://get.docker.com | bash"
 
     mkdir -p "$INSTALL_DIR"
-    build_mirror_order
+    resolve_git_mirrors "$VERSION"
 
     local tmp; tmp=$(mktemp -d)
     trap "rm -rf '$tmp'" EXIT
@@ -388,7 +413,7 @@ install_docker() {
     local dlrc
     download_foxwaf_image_bundle "$tmp" "$VERSION"
     dlrc=$?
-    [[ "$dlrc" -eq 1 ]] && die "镜像获取失败（Git 附件、服务端与 Docker Hub 均不可用）"
+    [[ "$dlrc" -eq 1 ]] && die "镜像获取失败（Git 附件、Docker Hub 与服务端均不可用）"
 
     if [[ "$dlrc" -eq 2 ]]; then
         log_ok "使用 Docker Hub 镜像，跳过 tar 导入"
@@ -469,8 +494,7 @@ install_foxwaf_bin() {
         local u try
         u="$MIRRORS_GITHUB_RAW_FOXWAF"
         for try in 1 2 3; do
-            prepare_curl_dns "$u"
-            if curl -fsSL --connect-timeout 8 "${CURL_DNS_ARGS[@]}" -o "$tmp" "$u" 2>/dev/null && head -1 "$tmp" | grep -q '^#!/bin/bash'; then
+            if curl -fsSL --connect-timeout 8 -o "$tmp" "$u" 2>/dev/null && head -1 "$tmp" | grep -q '^#!/bin/bash'; then
                 cp "$tmp" "$FOXWAF_BIN"; ok=true; break
             fi
             [[ "$try" -lt 3 ]] && sleep $((try * 2))
