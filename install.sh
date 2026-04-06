@@ -13,8 +13,8 @@ SERVER_API="http://${FOXWAF_SERVER}:8080/api/update/check"
 SERVER_DOWNLOAD="http://${FOXWAF_SERVER}:8080/release"
 WAF_DEFAULT_PORT=8088
 
-MIRRORS_GITHUB="${MIRRORS_GITHUB:-https://github.com/foxwaf/foxwaf-realese}"
-MIRRORS_GITHUB_RAW_FOXWAF="https://raw.githubusercontent.com/foxwaf/foxwaf-realese/main/foxwaf"
+MIRRORS_GITHUB="${MIRRORS_GITHUB:-https://github.com/foxwaf/foxwaf}"
+MIRRORS_GITHUB_RAW_FOXWAF="https://raw.githubusercontent.com/foxwaf/foxwaf/main/foxwaf"
 
 # ─── 颜色 & 符号 ────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'

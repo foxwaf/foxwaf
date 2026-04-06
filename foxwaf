@@ -626,7 +626,7 @@ do_import() {
 # ║  更新系统                                                      ║
 # ╚═══════════════════════════════════════════════════════════════╝
 
-MIRRORS_GITHUB="https://github.com/foxwaf/foxwaf-realese"
+MIRRORS_GITHUB="https://github.com/foxwaf/foxwaf"
 
 _dl() {
     local file="$1" dest="$2" ver="$3"
