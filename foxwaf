@@ -36,16 +36,33 @@ log_kv() {
     printf "  ${DM}%-10s${N} %b\n" "$k" "$v"
 }
 
+_show_cursor() {
+    tput cnorm 2>/dev/null || true
+    printf '\033[?25h'
+    if [[ -w /dev/tty ]]; then
+        tput cnorm >/dev/tty 2>/dev/null || true
+        printf '\033[?25h' >/dev/tty 2>/dev/null || true
+    fi
+}
+
 spinner() {
     local pid=$1 msg="${2:-}"
     local frames=('⣾' '⣽' '⣻' '⢿' '⡿' '⣟' '⣯' '⣷') i=0
+    _spinner_on_int() {
+        trap - INT EXIT
+        _show_cursor
+        exit 130
+    }
+    trap '_spinner_on_int' INT
+    trap '_show_cursor; trap - INT EXIT' EXIT
     tput civis 2>/dev/null
     while kill -0 "$pid" 2>/dev/null; do
         printf "\r  ${M}%s${N}  ${DM}%s${N}  " "${frames[$i]}" "$msg"
         i=$(( (i+1) % ${#frames[@]} ))
         sleep 0.1
     done
-    tput cnorm 2>/dev/null
+    trap - INT EXIT
+    _show_cursor
     wait "$pid" 2>/dev/null
     return $?
 }
@@ -73,7 +90,6 @@ _ensure_compose_db_volume() {
     :
 }
 
-# 将 compose 中的 image: 行替换为快照镜像（导入 docker commit 备份后使用）
 _compose_set_image() {
     local f="$1" img="$2"
     [[ -f "$f" ]] || return 0
@@ -175,7 +191,6 @@ _human_bytes() {
 }
 
 _parse_human_bytes() {
-    # Convert strings like: "0B", "12.3KB", "5.5GB" into bytes (integer).
     local s="$1"
     s=$(echo "${s}" | tr -d ' ')
     [[ -z "$s" ]] && { echo 0; return; }
@@ -204,7 +219,6 @@ _parse_human_bytes() {
     awk "BEGIN{printf \"%.0f\", ${num}*${factor}}"
 }
 
-# Cache previous network counters so we can show RX/TX rate (per second).
 _NET_LAST_TS_MS=0
 _NET_LAST_RX=0
 _NET_LAST_TX=0
@@ -227,7 +241,6 @@ do_status() {
     [[ -z "$port" ]] && port=8088
 
     if is_docker; then
-        # 必须用精确容器名 inspect，不能用 ps --filter name=（子串匹配会误报其它容器）
         if ! docker inspect "$CONTAINER" &>/dev/null; then
             running=false; state_txt="容器不存在"; state_color="$Y"
         elif [[ "$(docker inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null)" == "true" ]]; then
@@ -282,7 +295,6 @@ do_status() {
                     tx_b=$(echo "$net_line" | awk '{print $2}')
                     [[ -n "$rx_b" && "$rx_b" -gt 0 ]] && {
                         net_rx=$rx_b
-                        # Compact for terminal width consistency (e.g. "5.5GB" instead of "5.5 GB")
                         net_rx_str=$(_human_bytes "$rx_b" | tr -d ' ')
                     }
                     [[ -n "$tx_b" && "$tx_b" -gt 0 ]] && {
@@ -310,7 +322,6 @@ do_status() {
                     net_io=$(echo "$stats" | cut -d'|' -f4 | sed 's| *||g')
                     net_rx_str=$(echo "$net_io" | cut -d'/' -f1)
                     net_tx_str=$(echo "$net_io" | cut -d'/' -f2)
-                    # docker stats only provides human-readable totals; parse them to compute RX/TX rate.
                     net_rx=$(_parse_human_bytes "$net_rx_str")
                     net_tx=$(_parse_human_bytes "$net_tx_str")
                 fi
@@ -356,14 +367,11 @@ do_status() {
             live_ver=$(cat "${INSTALL_DIR}/history/current" 2>/dev/null | tr -d '[:space:]')
         fi
         [[ -n "$live_ver" ]] && ver="$live_ver"
-        # WAF 实际入口端口一般是 80/443（容器使用 host network_mode）。
-        # 这里拆开统计，避免把它们误当成面板的 8088。
         conns_http=$(ss -tnp 2>/dev/null | awk '$4 ~ /:80$/ || $5 ~ /:80$/ {c++} END{print c+0}' 2>/dev/null || true)
         conns_https=$(ss -tnp 2>/dev/null | awk '$4 ~ /:443$/ || $5 ~ /:443$/ {c++} END{print c+0}' 2>/dev/null || true)
         conns_http=${conns_http:-0}
         conns_https=${conns_https:-0}
 
-        # Compute RX/TX rate when we have raw counters from /proc (bytes).
         if (( net_rx > 0 && net_tx > 0 )); then
             local now_ms dt_ms rx_delta tx_delta
             now_ms=$(date +%s%3N 2>/dev/null || echo $(( $(date +%s) * 1000 )))
@@ -373,8 +381,6 @@ do_status() {
                 if (( dt_ms > 0 )); then
                     rx_delta=$(( net_rx - _NET_LAST_RX ))
                     tx_delta=$(( net_tx - _NET_LAST_TX ))
-                    # delta 可能因为 docker stats 的四舍五入而出现轻微负数；
-                    # 负数视作 0，避免速率字符串为空导致回退到总量显示。
                     (( rx_delta < 0 )) && rx_delta=0
                     (( tx_delta < 0 )) && tx_delta=0
                     net_rx_rate_b=$(( rx_delta * 1000 / dt_ms ))
@@ -491,7 +497,6 @@ do_export() {
     local bf="${bdir}/foxwaf-${ts}.tar.gz"
     local tmp; tmp=$(mktemp -d)
 
-    # Docker 且容器在：docker commit 当前容器 → save，与容器内文件系统一致（含 waf.db、/app/data 等）
     if is_docker && docker inspect "$CONTAINER" &>/dev/null; then
         local snap_tag="foxwaf/export:${ts}"
         log_dim "容器快照 docker commit → ${snap_tag}"
@@ -569,7 +574,6 @@ do_import() {
     tar -xzf "$bf" -C "$tmp"
     mkdir -p "$INSTALL_DIR"
 
-    # 新备份：docker commit 快照 → load 后让 compose 指向该镜像，容器内文件原样保留
     if [[ -f "${tmp}/container-snapshot.tar" && -f "${tmp}/export-image-tag" ]]; then
         local snap_tag
         snap_tag=$(tr -d '\r\n' <"${tmp}/export-image-tag")
@@ -782,18 +786,87 @@ show_help() {
 # ── 入口 ─────────────────────────────────────────────────────────
 [[ ! -d "$INSTALL_DIR" ]] && { log_err "未找到安装目录: ${INSTALL_DIR}"; exit 1; }
 
+# ╔═══════════════════════════════════════════════════════════════╗
+# ║  实时状态刷新（核心修复）                                       ║
+# ╚═══════════════════════════════════════════════════════════════╝
+
 do_status_live() {
-    trap 'tput cnorm 2>/dev/null; exit 0' INT TERM
-    tput civis 2>/dev/null
-    local tmp; tmp=$(mktemp 2>/dev/null || echo "/tmp/foxwaf-status-$$")
+    # ── 退出清理 ──────────────────────────────────────────────────
+    # 必须同时写 stdout 和 /dev/tty：
+    #   - Ctrl+C 时 bash 在 sleep 子进程退出后才跑 trap，stdout 缓冲可能已刷不到终端
+    #   - /dev/tty 直连控制终端，不受重定向/缓冲影响，是恢复光标最可靠的路径
+    _status_live_cleanup() {
+        trap - INT TERM HUP EXIT
+        # 两条路都写，哪条通哪条生效
+        local _SHOW_CURSOR=$'\033[?25h'
+        printf '%s' "$_SHOW_CURSOR"                                          # stdout
+        tput cnorm 2>/dev/null || true                                       # stdout (terminfo)
+        if [[ -w /dev/tty ]]; then
+            printf '%s' "$_SHOW_CURSOR" >/dev/tty                           # /dev/tty
+            tput cnorm >/dev/tty 2>/dev/null || true                        # /dev/tty (terminfo)
+            stty sane </dev/tty 2>/dev/null || true                         # 修复行规约
+        fi
+    }
+    trap '_status_live_cleanup; exit 0' INT TERM HUP
+    trap '_status_live_cleanup'         EXIT
+
+    # ── 隐藏光标（同样双写保证生效）────────────────────────────────
+    local _HIDE_CURSOR=$'\033[?25l'
+    printf '%s' "$_HIDE_CURSOR"
+    tput civis 2>/dev/null || true
+    if [[ -w /dev/tty ]]; then
+        printf '%s' "$_HIDE_CURSOR" >/dev/tty
+        tput civis >/dev/tty 2>/dev/null || true
+    fi
+
+    # ── 临时文件：渲染到文件再一次性输出，避免"先 clear 再慢渲染"闪烁 ──
+    local tmp
+    tmp=$(mktemp 2>/dev/null || echo "/tmp/foxwaf-status-$$")
+    trap '_status_live_cleanup; rm -f "$tmp"; exit 0' INT TERM HUP
+    trap '_status_live_cleanup; rm -f "$tmp"'         EXIT
+
+    # ── 首帧：先正常输出，记录行数供后续回跳 ────────────────────
+    do_status 2>/dev/null >"$tmp"
+    cat "$tmp"
+    printf "  ${DM}Ctrl+C 退出  ·  每 0.5s 刷新${N}\n"
+
+    # 记录本次输出行数（含提示行）
+    local last_lines
+    last_lines=$(wc -l <"$tmp")
+    last_lines=$(( last_lines + 1 ))   # +1 for 提示行
+
+    # ── 刷新循环 ─────────────────────────────────────────────────
     while true; do
-        # 在同一 shell 内采集并渲染到临时文件，避免命令替换子进程导致缓存丢失，
-        # 同时避免先 clear 再慢渲染带来的“闪一下/空一会儿”。
-        do_status 2>&1 >"$tmp"
-        tput clear 2>/dev/null || printf "\033[H\033[2J"
-        cat "$tmp"
-        printf "  ${DM}Ctrl+C 退出  ·  实时刷新${N}\n"
         sleep 0.5
+
+        # 采集新内容
+        do_status 2>/dev/null >"$tmp"
+
+        local new_lines
+        new_lines=$(wc -l <"$tmp")
+        new_lines=$(( new_lines + 1 ))  # +1 for 提示行
+
+        # 回跳到上一帧起始行：用 \033[<N>A（光标上移 N 行）
+        printf "\033[%dA" "$last_lines"
+
+        # 逐行覆写（\033[2K 清整行，避免旧内容残留）
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            printf '\033[2K%s\n' "$line"
+        done <"$tmp"
+        printf '\033[2K'"  ${DM}Ctrl+C 退出  ·  每 0.5s 刷新${N}\n"
+
+        # 如果新帧比旧帧行数少（Running→Stopped 时资源块消失），
+        # 清除多余的旧行
+        if (( new_lines < last_lines )); then
+            local extra=$(( last_lines - new_lines ))
+            for (( i=0; i<extra; i++ )); do
+                printf '\033[2K\n'
+            done
+            # 再把光标拉回到内容末尾
+            printf "\033[%dA" "$extra"
+        fi
+
+        last_lines=$new_lines
     done
 }
 
