@@ -738,7 +738,7 @@ do_uninstall() {
     confirm "确认卸载？" || { log_dim "已取消"; return 0; }
     do_stop 2>/dev/null
     if is_docker; then
-        cd "$INSTALL_DIR" && docker compose down --rmi local 2>/dev/null || true
+        cd "$INSTALL_DIR" && docker compose down --rmi all 2>/dev/null || true
     fi
     rm -f /usr/local/bin/foxwaf
     log_ok "已卸载"
