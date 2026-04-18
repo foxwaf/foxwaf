@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "features": [
+    "AI 训练爬虫 UA 黑名单（GPTBot/ClaudeBot/Bytespider/PerplexityBot 等 25+）",
+    "Prompt Injection 提示词注入检测（URL/关键头/Body，中英文双语）",
+    "命中 AI 爬虫即注入 ACL（默认 15 分钟）",
+    "本地去重 60s，避免 body 巨大反复消耗 CPU"
+  ]
+}

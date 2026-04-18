@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "features": [
+    "云元数据地址检测（169.254.169.254/metadata.google.internal/100.100.100.200/fd00:ec2::254）",
+    "危险 scheme 拦截（gopher/dict/file/ftp/ldap/jar）",
+    "URL/Referer/Body 多层扫描 + 十进制/十六进制 IP 归一化",
+    "30s 内命中 5 次自动 ACL 封 30 分钟"
+  ]
+}

@@ -1,13 +1,37 @@
 plugins:
-    filename-validator:
-        order: 3
-        enabled: false
-        position: before_waf
     useragent-validator:
         order: 1
         enabled: false
         position: before_waf
     scan-guard:
         order: 2
+        enabled: true
+        position: before_waf
+    filename-validator:
+        order: 3
+        enabled: false
+        position: before_waf
+    ai-shield:
+        order: 4
+        enabled: true
+        position: before_waf
+    cloud-ssrf:
+        order: 5
+        enabled: true
+        position: before_waf
+    auth-guard:
+        order: 6
+        enabled: true
+        position: before_waf
+    smuggler-guard:
+        order: 7
+        enabled: true
+        position: before_waf
+    tool-fingerprint:
+        order: 8
+        enabled: true
+        position: before_waf
+    graphql-guard:
+        order: 9
         enabled: true
         position: before_waf

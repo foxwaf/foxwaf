@@ -1,0 +1,10 @@
+{
+  "version": "1.0.0",
+  "features": [
+    "GraphQL 端点自动识别（/graphql /graphiql /api/graphql 等）",
+    "查询深度限制（默认 10 层）防递归 DoS",
+    "Alias 数量限制（默认 50）防批量放大",
+    "生产环境 introspection（__schema/__type）默认拦截",
+    "支持 GET/POST JSON/application-graphql/form-urlencoded 多种传递方式"
+  ]
+}

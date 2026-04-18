@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "features": [
+    "HTTP 请求走私检测（CL.TE/TE.CL/多重 CL/多重 TE/混淆 TE）",
+    "CRLF 注入头值检查",
+    "异常 Content-Length（负数/超 1GB/逗号/非数字）",
+    "3 次 60s 内命中即 ACL 封 30 分钟"
+  ]
+}
