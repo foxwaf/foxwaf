@@ -108,6 +108,19 @@ func SetHostAPI(
 	hostGetClientIP = getClientIP
 }
 
+// ---------------- PluginLogger (WebSocket 实时事件) ----------------
+var hostLogEvent func(level, event, ip string, fields map[string]any)
+
+func SetPluginLogger(emit func(level, event, ip string, fields map[string]any)) {
+	hostLogEvent = emit
+}
+
+func logEvt(level, event, ip string, fields map[string]any) {
+	if f := hostLogEvent; f != nil {
+		f(level, event, ip, fields)
+	}
+}
+
 // ---------------- IP / 本地去重 ----------------
 type ipState struct {
 	lastBlock atomic.Int64
@@ -227,6 +240,7 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 					_ = hostAddACLBlock(pIP, "ai-shield", "ai-bot UA: "+pSig, time.Now().Unix()+aclBlockSec)
 				}(ip, sig)
 			}
+			logEvt("block", "ai_bot", ip, map[string]any{"ua_sig": sig, "path": r.URL.Path})
 			respondBlock(w, "ai-bot:"+sig)
 			return nil, true
 		}
@@ -251,6 +265,7 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	urlLower := strings.ToLower(decodedQS + " " + rawQS + " " + r.URL.Path)
 	if sig := matchPromptInjection(urlLower); sig != "" {
 		markBlock(ip, now)
+		logEvt("block", "prompt_injection", ip, map[string]any{"where": "url", "sig": sig})
 		respondBlock(w, "prompt-injection:url:"+sig)
 		return nil, true
 	}
@@ -259,6 +274,7 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 		if v := r.Header.Get(h); v != "" {
 			if sig := matchPromptInjection(strings.ToLower(v)); sig != "" {
 				markBlock(ip, now)
+				logEvt("block", "prompt_injection", ip, map[string]any{"where": "header:" + h, "sig": sig})
 				respondBlock(w, "prompt-injection:header:"+sig)
 				return nil, true
 			}
@@ -274,6 +290,7 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 			if len(body) > 0 {
 				if sig := matchPromptInjection(strings.ToLower(bytesToString(body))); sig != "" {
 					markBlock(ip, now)
+					logEvt("block", "prompt_injection", ip, map[string]any{"where": "body", "sig": sig})
 					respondBlock(w, "prompt-injection:body:"+sig)
 					return nil, true
 				}

@@ -51,6 +51,19 @@ func SetHostAPI(
 	hostGetClientIP = getClientIP
 }
 
+// ---------------- PluginLogger (WebSocket 实时事件) ----------------
+var hostLogEvent func(level, event, ip string, fields map[string]any)
+
+func SetPluginLogger(emit func(level, event, ip string, fields map[string]any)) {
+	hostLogEvent = emit
+}
+
+func logEvt(level, event, ip string, fields map[string]any) {
+	if f := hostLogEvent; f != nil {
+		f(level, event, ip, fields)
+	}
+}
+
 type ipState struct {
 	hits      atomic.Int32
 	windowTs  atomic.Int64
@@ -199,6 +212,7 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	}
 	if reason := inspect(r); reason != "" {
 		onHit(ip, reason)
+		logEvt("block", "smuggling", ip, map[string]any{"reason": reason, "method": r.Method})
 		respondBlock(w, reason)
 		return nil, true
 	}
@@ -230,6 +244,7 @@ func onHit(ip, reason string) {
 	hits := st.hits.Add(1)
 	if hits >= burstThresh && st.blocked.Load() < now-60 {
 		st.blocked.Store(now)
+		logEvt("block", "smuggling_threshold", ip, map[string]any{"hits": hits, "reason": reason})
 		if hostAddACLBlock != nil {
 			if hostIsWhitelisted == nil || !hostIsWhitelisted(ip) {
 				go func(p, rs string, h int32) {

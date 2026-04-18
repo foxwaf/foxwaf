@@ -89,6 +89,19 @@ func SetHostAPI(
 	hostGetClientIP = getClientIP
 }
 
+// ---------------- PluginLogger (WebSocket 实时事件) ----------------
+var hostLogEvent func(level, event, ip string, fields map[string]any)
+
+func SetPluginLogger(emit func(level, event, ip string, fields map[string]any)) {
+	hostLogEvent = emit
+}
+
+func logEvt(level, event, ip string, fields map[string]any) {
+	if f := hostLogEvent; f != nil {
+		f(level, event, ip, fields)
+	}
+}
+
 type ipState struct {
 	hits      atomic.Int32
 	windowTs  atomic.Int64
@@ -276,6 +289,7 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	target := strings.ToLower(r.URL.Path + "?" + r.URL.RawQuery)
 	if reason := scanSSRF(target); reason != "" {
 		onHit(ip, reason)
+		logEvt("block", "ssrf", ip, map[string]any{"where": "url", "reason": reason, "path": r.URL.Path})
 		respondBlock(w, reason)
 		return nil, true
 	}
@@ -284,6 +298,7 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 		if v := r.Header.Get(h); v != "" {
 			if reason := scanSSRF(strings.ToLower(v)); reason != "" {
 				onHit(ip, reason)
+				logEvt("block", "ssrf", ip, map[string]any{"where": "header:" + h, "reason": reason})
 				respondBlock(w, "header:"+h+":"+reason)
 				return nil, true
 			}
@@ -299,6 +314,7 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 			if len(body) > 0 {
 				if reason := scanSSRF(strings.ToLower(string(body))); reason != "" {
 					onHit(ip, reason)
+					logEvt("block", "ssrf", ip, map[string]any{"where": "body", "reason": reason})
 					respondBlock(w, "body:"+reason)
 					return nil, true
 				}
@@ -335,6 +351,7 @@ func onHit(ip, reason string) {
 	hits := st.hits.Add(1)
 	if hits >= burstThresh && st.blocked.Load() < now-60 {
 		st.blocked.Store(now)
+		logEvt("block", "ssrf_threshold", ip, map[string]any{"hits": hits, "window": burstWindow, "reason": reason})
 		if hostAddACLBlock != nil {
 			if hostIsWhitelisted == nil || !hostIsWhitelisted(ip) {
 				go func(p, rs string) {
