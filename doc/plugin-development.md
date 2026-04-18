@@ -140,16 +140,93 @@ func SetHostAPI(
 
 > **强烈建议**：任何涉及"对 IP 判断"的插件都用 `getClientIP` 取 IP，不要自己读 header。
 
-### 3.4 签名规则速查
+### 3.4 **必须**：`SetPluginLogger`（实时事件日志）
+
+> ⛔ **强制要求**：所有提交到 FoxWAF 官方仓库 / 插件市场的插件**必须**导出 `SetPluginLogger`，并在**每一个拦截 / 命中 / 阈值触发 / 关键判定**点调用 logger。
+>
+> 没有实时日志 = 用户无法感知插件在工作 = PR 会被拒收、插件市场会下架。
+
+主进程会把每个插件的 logger 事件通过 WebSocket (`/api/plugins/events/ws`) 实时推送到 "插件管理" 页，用户能看到插件在毫秒级别拦截攻击的数据流。
+
+#### 插件侧模板（复制粘贴即用）
+
+```go
+// ---------------- PluginLogger ----------------
+var hostLogEvent func(level, event, ip string, fields map[string]any)
+
+// 主进程加载时注入；logger 的闭包已绑定当前插件名
+func SetPluginLogger(emit func(level, event, ip string, fields map[string]any)) {
+    hostLogEvent = emit
+}
+
+// 非阻塞调用；热路径零开销，通道满会自动丢弃
+func logEvt(level, event, ip string, fields map[string]any) {
+    if f := hostLogEvent; f != nil {
+        f(level, event, ip, fields)
+    }
+}
+```
+
+#### 调用约定
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| `level` | `string` | **必填**，固定取值之一：`block` / `hit` / `warn` / `info` / `error` |
+| `event` | `string` | **必填**，短动作名（snake_case），例如 `ai_bot`、`prompt_injection`、`ssrf`、`brute_force`、`scanner`、`gql_depth` |
+| `ip` | `string` | 客户端 IP（请用 `hostGetClientIP(r)` 取，不要自己读 header） |
+| `fields` | `map[string]any` | 附加上下文，会在面板以 `key=value` 形式渲染；**不要放大对象**（长度 >256 的字符串会被截断） |
+
+#### `level` 取值规则（务必遵守）
+
+| level | 场景 | 示例 |
+|---|---|---|
+| `block` | 请求**被拦截** | AI 爬虫 UA 命中、SSRF URL 命中、阈值触发 ACL 封禁 |
+| `hit` | 命中规则但未拦截（计数类） | auth-guard 统计一次失败登录、CC 预警 |
+| `warn` | 可疑但不确定的行为 | 打分接近阈值、配置异常 |
+| `info` | 正常状态变化 | 插件启动、配置重载 |
+| `error` | 插件自身出错 | 正则编译失败、外部依赖不可用 |
+
+#### 何时必须埋点
+
+- ✅ **每一次** `respondBlock()` / 返回 `(nil, true)` 之前
+- ✅ **每一次** `hostAddACLBlock()` 调用（写 ACL 必须可观测）
+- ✅ **阈值触发**（滑窗达到临界值、计数翻倍等）
+- ✅ **插件自身异常**（用 `error` level）
+- ❌ 常规放行路径**不要**打日志（会刷屏）
+
+#### 示例：ai-shield 的埋点
+
+```go
+if sig := matchAIBot(uaLower); sig != "" {
+    logEvt("block", "ai_bot", ip, map[string]any{
+        "ua_sig": sig,
+        "path":   r.URL.Path,
+    })
+    go hostAddACLBlock(ip, "ai-shield", "ai-bot: "+sig, time.Now().Unix()+900)
+    respondBlock(w, "ai-bot:"+sig)
+    return nil, true
+}
+```
+
+#### 性能说明
+
+`logEvt` 在热路径调用是**安全**的：
+- 非阻塞：内部只做一次 `select { case ch <- ev: default: drop }`
+- 零分配（除了你自己创建的 `map[string]any`）
+- 通道大小 4096，极端洪水场景丢弃，主进程会累计 `dropped` 计数
+- 批量发送：40ms 聚合一次或满 64 条立即 flush，前端接收端基本感觉不到延迟
+
+### 3.5 签名规则速查
 
 | 符号 | 签名 | 必需 |
 |---|---|---|
 | `Init` | `func() (string, int, bool, func(http.ResponseWriter, *http.Request) (*http.Request, bool))` | ✅ |
 | `Handler` | `func(http.ResponseWriter, *http.Request) (*http.Request, bool)` | ✅（`Init` 返回值里已经引用了它）|
-| `AfterResponse` | `func(*http.Request, int, http.Header)` | ❌ |
-| `SetHostAPI` | `func(func(string,string,string,int64) error, func(string) bool, func(*http.Request) string)` | ❌ |
+| `AfterResponse` | `func(*http.Request, int, http.Header)` | ❌ 可选 |
+| `SetHostAPI` | `func(func(string,string,string,int64) error, func(string) bool, func(*http.Request) string)` | ❌ 可选（但强烈推荐，需要写 ACL 的必须有） |
+| `SetPluginLogger` | `func(func(level, event, ip string, fields map[string]any))` | ✅ **强制**（所有官方插件必需） |
 
-### 3.5 性能与安全红线
+### 3.6 性能与安全红线
 
 - **Handler 是热路径**：每个请求都会过一遍。不要做 `fmt.Sprintf` / 正则复杂匹配 / 锁争用 / 磁盘 I/O；能用 `atomic` 就用 `atomic`，能用 `sync.Map` 就别用 `map+mutex`
 - **AfterResponse 零拷贝**：只能用 header 与 status，**严禁读 body**（FoxWAF 不会传 body，避免 N 倍内存压力）
