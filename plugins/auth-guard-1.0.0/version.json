@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "features": [
+    "登录端点（/login /oauth/token /api/auth 等 10+ 模式）暴破/撞库保护",
+    "AfterResponse 响应后钩子统计 400/401/403/422 失败",
+    "滑动窗口 10s / 10 次失败即 ACL 封禁 1 小时",
+    "架构与 scan-guard 对齐，热路径零开销"
+  ]
+}

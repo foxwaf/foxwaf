@@ -1,0 +1,9 @@
+{
+  "version": "1.0.0",
+  "features": [
+    "扫描器 UA 指纹（sqlmap/nuclei/acunetix/nikto/ffuf/xray/zaproxy 等 35+）",
+    "特征头/路径识别（acunetix-aspect、nuclei-template、{{BaseURL}}）",
+    "OOB 域名黑名单（burpcollaborator/oast.*/interact.sh/dnslog）",
+    "单次命中即 ACL 封 1 小时，本地去重 60s"
+  ]
+}
