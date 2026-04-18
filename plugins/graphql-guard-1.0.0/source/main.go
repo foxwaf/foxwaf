@@ -64,6 +64,19 @@ func SetHostAPI(
 	hostGetClientIP = getClientIP
 }
 
+// ---------------- PluginLogger (WebSocket 实时事件) ----------------
+var hostLogEvent func(level, event, ip string, fields map[string]any)
+
+func SetPluginLogger(emit func(level, event, ip string, fields map[string]any)) {
+	hostLogEvent = emit
+}
+
+func logEvt(level, event, ip string, fields map[string]any) {
+	if f := hostLogEvent; f != nil {
+		f(level, event, ip, fields)
+	}
+}
+
 type ipState struct {
 	hits      atomic.Int32
 	windowTs  atomic.Int64
@@ -295,21 +308,25 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 
 	if disallowIntrospect && m.introspect {
 		onHit(ip, "introspection")
+		logEvt("block", "gql_introspection", ip, map[string]any{"path": r.URL.Path})
 		respondBlock(w, "introspection")
 		return nil, true
 	}
 	if m.depth > maxDepth {
 		onHit(ip, "depth")
+		logEvt("block", "gql_depth", ip, map[string]any{"depth": m.depth, "limit": maxDepth})
 		respondBlock(w, "depth-exceeded")
 		return nil, true
 	}
 	if m.aliases > maxAliases {
 		onHit(ip, "alias-flood")
+		logEvt("block", "gql_alias", ip, map[string]any{"aliases": m.aliases, "limit": maxAliases})
 		respondBlock(w, "alias-flood")
 		return nil, true
 	}
 	if m.fields > maxFields {
 		onHit(ip, "field-flood")
+		logEvt("block", "gql_field", ip, map[string]any{"fields": m.fields, "limit": maxFields})
 		respondBlock(w, "field-flood")
 		return nil, true
 	}

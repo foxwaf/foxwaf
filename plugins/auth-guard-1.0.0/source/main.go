@@ -69,6 +69,19 @@ func SetHostAPI(
 	hostGetClientIP = getClientIP
 }
 
+// ---------------- PluginLogger (WebSocket 实时事件) ----------------
+var hostLogEvent func(level, event, ip string, fields map[string]any)
+
+func SetPluginLogger(emit func(level, event, ip string, fields map[string]any)) {
+	hostLogEvent = emit
+}
+
+func logEvt(level, event, ip string, fields map[string]any) {
+	if f := hostLogEvent; f != nil {
+		f(level, event, ip, fields)
+	}
+}
+
 type ipStat struct {
 	buckets    [bucketCount]atomic.Int32
 	bucketTs   [bucketCount]atomic.Int64
@@ -182,6 +195,7 @@ func AfterResponse(r *http.Request, statusCode int, _ http.Header) {
 		return
 	}
 	now := time.Now().Unix()
+	logEvt("hit", "auth_fail", ip, map[string]any{"path": r.URL.Path, "status": statusCode})
 
 	v, ok := ipStats.Load(ip)
 	if !ok {
@@ -221,6 +235,7 @@ func AfterResponse(r *http.Request, statusCode int, _ http.Header) {
 		for i := 0; i < bucketCount; i++ {
 			st.buckets[i].Store(0)
 		}
+		logEvt("block", "brute_force", ip, map[string]any{"fails": sum, "window": windowSec, "ttl": blockSec})
 		const localDedupSec = 30
 		if hostAddACLBlock == nil {
 			st.blockUntil.Store(now + blockSec)

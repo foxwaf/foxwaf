@@ -118,6 +118,19 @@ func SetHostAPI(
 	hostGetClientIP = getClientIP
 }
 
+// ---------------- PluginLogger (WebSocket 实时事件) ----------------
+var hostLogEvent func(level, event, ip string, fields map[string]any)
+
+func SetPluginLogger(emit func(level, event, ip string, fields map[string]any)) {
+	hostLogEvent = emit
+}
+
+func logEvt(level, event, ip string, fields map[string]any) {
+	if f := hostLogEvent; f != nil {
+		f(level, event, ip, fields)
+	}
+}
+
 type ipState struct {
 	lastBlock atomic.Int64
 	lastTouch atomic.Int64
@@ -231,6 +244,7 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 	if reason == "" {
 		return r, false
 	}
+	logEvt("block", "scanner", ip, map[string]any{"reason": reason, "ua": r.Header.Get("User-Agent"), "path": r.URL.Path})
 
 	// 高置信度 → 一次命中即 ACL 封 1 小时
 	now := time.Now().Unix()
