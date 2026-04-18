@@ -1,0 +1,13 @@
+plugins:
+    filename-validator:
+        order: 3
+        enabled: false
+        position: before_waf
+    useragent-validator:
+        order: 1
+        enabled: false
+        position: before_waf
+    scan-guard:
+        order: 2
+        enabled: true
+        position: before_waf
