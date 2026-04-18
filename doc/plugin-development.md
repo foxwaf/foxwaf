@@ -228,7 +228,12 @@ zip 内 **必须** 只有一个顶层目录，目录名必须等于 `<name>-<ver
 - LRU 上限 10 万 IP，IPv6 按 `/64` 聚合防地址放大攻击
 - 命中阈值后重置桶计数，30 秒本地去重窗口防止 ACL 写爆
 
-源码位置：`/app/plugins/scan-guard-1.0.0/source/main.go`，可作为模板参考。
+源码位置：[`plugins/scan-guard-1.0.0/source/main.go`](../plugins/scan-guard-1.0.0/source/main.go)，可作为模板参考。
+
+> 📦 **本仓库开源插件**：[`plugins/`](../plugins/) 目录下提供了 3 个可直接参考的实战插件：
+> - [`scan-guard-1.0.0`](../plugins/scan-guard-1.0.0/) — 目录扫描防护（AfterResponse + HostAPI + 中央 ACL）
+> - [`useragent-validator-1.0.0`](../plugins/useragent-validator-1.0.0/) — 扫描器 UA 黑名单
+> - [`filename-validator-1.0.0`](../plugins/filename-validator-1.0.0/) — 敏感文件名拦截
 
 ---
 
