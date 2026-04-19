@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -25,36 +26,94 @@ const (
 //go:embed block.html
 var blockPageHTML string
 
+// ---------------- HostAPI ----------------
+// 仅注入 getClientIP 即可（本插件不写 ACL，但需要可信代理感知的客户端 IP 写日志）；
+// SetHostAPI 签名与其它插件保持一致，便于主进程统一注入。
+var hostGetClientIP func(r *http.Request) string
+
+func SetHostAPI(
+	_ func(ip, source, desc string, expireUnix int64) error,
+	_ func(ip string) bool,
+	getClientIP func(r *http.Request) string,
+) {
+	hostGetClientIP = getClientIP
+}
+
+// ---------------- PluginLogger (WebSocket 实时事件) ----------------
+var hostLogEvent func(level, event, ip string, fields map[string]any)
+
+func SetPluginLogger(emit func(level, event, ip string, fields map[string]any)) {
+	hostLogEvent = emit
+}
+
+func logEvt(level, event, ip string, fields map[string]any) {
+	if f := hostLogEvent; f != nil {
+		f(level, event, ip, fields)
+	}
+}
+
+// clientIPFromRequest 优先用主进程注入的可信 IP 解析，兜底使用常见代理头/RemoteAddr
+func clientIPFromRequest(r *http.Request) string {
+	if hostGetClientIP != nil {
+		if ip := strings.TrimSpace(hostGetClientIP(r)); ip != "" {
+			return ip
+		}
+	}
+	if v := r.Header.Get("X-Real-IP"); v != "" {
+		return strings.TrimSpace(v)
+	}
+	if v := r.Header.Get("X-Forwarded-For"); v != "" {
+		if i := strings.IndexByte(v, ','); i >= 0 {
+			return strings.TrimSpace(v[:i])
+		}
+		return strings.TrimSpace(v)
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// truncate 截断字符串用于日志展示，避免超长 filename 撑爆事件总线
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "...(trunc)"
+}
+
 // isDangerousFilename 检测 filename 是否包含空字节或路径穿越等危险字符（纯字符串判断，无正则，保证性能）
-func isDangerousFilename(filename string) bool {
+// 第二个返回值给出命中的具体原因，供日志记录区分攻击类型。
+func isDangerousFilename(filename string) (bool, string) {
 	if filename == "" {
-		return false
+		return false, ""
 	}
 	// 实际空字节
 	if strings.Contains(filename, "\x00") {
-		return true
+		return true, "null_byte"
 	}
 	// URL 编码空字节
 	if strings.Contains(filename, "%00") {
-		return true
+		return true, "url_encoded_null"
 	}
 	// 转义形式 \x00
 	if strings.Contains(filename, `\x00`) {
-		return true
+		return true, "escaped_null"
 	}
 	// Windows 路径穿越
 	if strings.Contains(filename, "..\\") {
-		return true
+		return true, "path_traversal_win"
 	}
 	// Unix 路径穿越
 	if strings.Contains(filename, "../") {
-		return true
+		return true, "path_traversal_unix"
 	}
 	// URL 编码的 .. (%2e%2e) 路径穿越
 	if strings.Contains(filename, "%2e%2e") {
-		return true
+		return true, "path_traversal_encoded"
 	}
-	return false
+	return false, ""
 }
 
 // getRawFilenameFromPart 从 Part 的 Content-Disposition 头解析出原始 filename（未经 filepath.Base）
@@ -110,7 +169,14 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 		}
 		partCount++
 		if partCount > maxMultipartParts {
+			ip := clientIPFromRequest(r)
+			logEvt("block", "too_many_parts", ip, map[string]any{
+				"path":  r.URL.Path,
+				"host":  r.Host,
+				"limit": maxMultipartParts,
+			})
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-Blocked-By", "filename-validator")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(blockPageHTML))
 			return nil, true
@@ -121,13 +187,30 @@ func Handler(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
 			rawFilename = part.FileName()
 		}
 		if len(rawFilename) > maxFilenameLen {
+			ip := clientIPFromRequest(r)
+			logEvt("block", "overlong_filename", ip, map[string]any{
+				"path":     r.URL.Path,
+				"host":     r.Host,
+				"filename": truncate(rawFilename, 64),
+				"length":   len(rawFilename),
+				"limit":    maxFilenameLen,
+			})
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-Blocked-By", "filename-validator")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(blockPageHTML))
 			return nil, true
 		}
-		if isDangerousFilename(rawFilename) {
+		if hit, reason := isDangerousFilename(rawFilename); hit {
+			ip := clientIPFromRequest(r)
+			logEvt("block", "dangerous_filename", ip, map[string]any{
+				"path":     r.URL.Path,
+				"host":     r.Host,
+				"filename": truncate(rawFilename, 256),
+				"reason":   reason,
+			})
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-Blocked-By", "filename-validator")
 			w.WriteHeader(http.StatusForbidden)
 			w.Write([]byte(blockPageHTML))
 			return nil, true
