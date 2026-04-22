@@ -269,7 +269,7 @@ Transfer/sec:      0.91GB
 ### 一键安装（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/foxwaf/foxwaf/main/install.sh | bash -s -- --version 1.35beta
+curl -fsSL https://raw.githubusercontent.com/foxwaf/foxwaf/main/install.sh | bash -s -- --version 1.36beta
 ```
 
 安装脚本会自动检测环境、下载 Docker 镜像、配置并启动服务。
