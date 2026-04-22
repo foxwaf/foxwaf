@@ -34,28 +34,44 @@ log_dim()  { echo -e "     ${DIM}$*${RESET}"; }
 
 die() { log_fail "$*"; exit 1; }
 
+# TTY 检测：仅在交互式终端使用 \r 刷新动画，否则退化为每步一行
+IS_TTY=false
+[[ -t 1 ]] && IS_TTY=true
+
 spinner() {
     local pid=$1 msg="${2:-}"
+    if [[ "$IS_TTY" != "true" ]]; then
+        echo -e "  ${SYM_DOT}  ${msg}..."
+        wait "$pid" 2>/dev/null
+        return $?
+    fi
     local frames=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
     local i=0
     while kill -0 "$pid" 2>/dev/null; do
-        printf "\r  ${CYAN}${frames[$i]}${RESET}  %s" "$msg"
+        printf "\r\033[2K  ${CYAN}${frames[$i]}${RESET}  %s" "$msg"
         i=$(( (i + 1) % ${#frames[@]} ))
         sleep 0.08
     done
+    printf "\r\033[2K"
     wait "$pid" 2>/dev/null
     return $?
 }
 
+# 进度条：使用 ASCII 字符（1 列宽，避免宽字符/终端兼容性问题导致换行刷屏）
+# 带 \033[2K 整行清除，防止折行时残影追加
 progress_bar() {
-    local current=$1 total=$2 label="${3:-}" width=30
+    local current=$1 total=$2 label="${3:-}" width=20
+    [[ "$IS_TTY" != "true" ]] && return 0
+    (( total <= 0 )) && return 0
     local pct=$((current * 100 / total))
+    (( pct > 100 )) && pct=100
     local filled=$((current * width / total))
+    (( filled > width )) && filled=$width
     local empty=$((width - filled))
     local bar=""
-    for ((i=0; i<filled; i++)); do bar+="█"; done
-    for ((i=0; i<empty; i++)); do bar+="░"; done
-    printf "\r  ${SYM_DOT}  ${DIM}%-12s${RESET} ${BLUE}%s${RESET} ${DIM}%3d%%${RESET}" "$label" "$bar" "$pct"
+    for ((i=0; i<filled; i++)); do bar+="="; done
+    for ((i=0; i<empty; i++)); do bar+="-"; done
+    printf "\r\033[2K  ${SYM_DOT}  ${DIM}%-14s${RESET} ${BLUE}[%s]${RESET} ${DIM}%3d%%${RESET}" "$label" "$bar" "$pct"
 }
 
 download_with_progress() {
@@ -66,29 +82,37 @@ download_with_progress() {
         total_size=$(curl -sI -L "$url" 2>/dev/null | grep -i content-length | tail -1 | awk '{print $2}' | tr -d '\r') || true
 
         if [[ -n "$total_size" && "$total_size" -gt 0 ]] 2>/dev/null; then
-            curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
-            dl_pid=$!
-            while kill -0 "$dl_pid" 2>/dev/null; do
-                if [[ -f "$tmpfile" ]]; then
-                    cur_size=$(stat -c%s "$tmpfile" 2>/dev/null || echo 0)
-                    progress_bar "$cur_size" "$total_size" "$label"
+            if [[ "$IS_TTY" == "true" ]]; then
+                curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
+                dl_pid=$!
+                while kill -0 "$dl_pid" 2>/dev/null; do
+                    if [[ -f "$tmpfile" ]]; then
+                        cur_size=$(stat -c%s "$tmpfile" 2>/dev/null || echo 0)
+                        progress_bar "$cur_size" "$total_size" "$label"
+                    fi
+                    sleep 0.3
+                done
+                wait "$dl_pid" 2>/dev/null
+                ret=$?
+                if [[ $ret -eq 0 ]]; then
+                    progress_bar "$total_size" "$total_size" "$label"
+                    echo ""
+                    mv "$tmpfile" "$dest"
+                    return 0
                 fi
-                sleep 0.3
-            done
-            wait "$dl_pid" 2>/dev/null
-            ret=$?
-            if [[ $ret -eq 0 ]]; then
-                progress_bar "$total_size" "$total_size" "$label"
-                echo ""
-                mv "$tmpfile" "$dest"
-                return 0
+            else
+                echo -e "  ${SYM_DOT}  ${label} ($((total_size / 1024 / 1024)) MB)..."
+                if curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null; then
+                    mv "$tmpfile" "$dest"
+                    return 0
+                fi
             fi
         else
             curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
             spinner $! "$label"
             ret=$?
             if [[ $ret -eq 0 && -f "$tmpfile" ]]; then
-                echo ""
+                [[ "$IS_TTY" == "true" ]] && echo ""
                 mv "$tmpfile" "$dest"
                 return 0
             fi
