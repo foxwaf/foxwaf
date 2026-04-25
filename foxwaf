@@ -164,6 +164,101 @@ do_restart() {
     do_start
 }
 
+_rand_secret() {
+    local n="${1:-16}"
+    tr -dc 'A-Za-z0-9' </dev/urandom 2>/dev/null | head -c "$n"
+}
+
+_panel_port() {
+    local p
+    if is_docker; then
+        p=$(docker exec "$CONTAINER" sh -c "awk '/^[[:space:]]*Port:/{print \$2; exit}' /app/conf.yaml" 2>/dev/null)
+    else
+        p=$(awk '/^\s*Port:/{print $2; exit}' "${INSTALL_DIR}/conf.yaml" 2>/dev/null)
+    fi
+    [[ -z "$p" ]] && p=8088
+    echo "$p"
+}
+
+# 读取 WAF 启动时随机生成的 reload token（保存在容器/裸机 /tmp/.foxwaf_reload_token，权限 0600）
+_read_reload_token() {
+    if is_docker; then
+        docker exec "$CONTAINER" cat /tmp/.foxwaf_reload_token 2>/dev/null
+    else
+        cat /tmp/.foxwaf_reload_token 2>/dev/null
+    fi
+}
+
+# JSON 转义（仅处理 \ 和 " 与控制字符 \n \r \t）
+_json_escape() {
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+do_reset_auth() {
+    local new_user="${1:-fox}"
+    local new_pass="${2:-$(_rand_secret 18)}"
+    log_step "重置面板认证（无重启热加载）"
+
+    if is_docker; then
+        if [[ "$(docker inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null)" != "true" ]]; then
+            log_err "容器未运行，无法热重载认证"
+            return 1
+        fi
+    else
+        [[ -f "${INSTALL_DIR}/conf.yaml" ]] || { log_err "未找到 conf.yaml"; return 1; }
+    fi
+
+    local tok port
+    tok="$(_read_reload_token)"
+    if [[ -z "$tok" ]]; then
+        log_err "无法读取 /tmp/.foxwaf_reload_token —— WAF 是否启动？是否为新版？"
+        return 1
+    fi
+    port="$(_panel_port)"
+
+    local body
+    body=$(printf '{"username":"%s","password":"%s"}' "$(_json_escape "$new_user")" "$(_json_escape "$new_pass")")
+
+    # 8088 强制 HTTPS 自签证书 → -k 跳过校验；
+    # WAF 内部接口同时更新内存账户与 conf.yaml，无需额外操作。
+    # 注意：--resolve + Host: 127.0.0.1 强制走 loopback 直连，
+    #       同时显式不带任何 X-Forwarded-* 头，满足 WAF 的本地白名单防护。
+    local resp http_code
+    resp=$(curl -ksS -o /tmp/.reset_auth_resp.json -w '%{http_code}' \
+        --max-time 10 \
+        --noproxy '*' \
+        --resolve "127.0.0.1:${port}:127.0.0.1" \
+        -X POST \
+        -H "Host: 127.0.0.1:${port}" \
+        -H "X-Reload-Token: ${tok}" \
+        -H "Content-Type: application/json" \
+        --data "${body}" \
+        "https://127.0.0.1:${port}/internal/auth/reload" 2>/dev/null) || {
+        log_err "调用 /internal/auth/reload 失败（curl 退出非零）"
+        return 1
+    }
+    http_code="${resp}"
+
+    if [[ "${http_code}" != "200" ]]; then
+        log_err "热重载失败：HTTP ${http_code}"
+        if [[ -s /tmp/.reset_auth_resp.json ]]; then
+            log_dim "服务端响应：$(cat /tmp/.reset_auth_resp.json)"
+        fi
+        return 1
+    fi
+
+    log_ok "认证已热重载（无需重启，业务流量不中断）"
+    log_info "新账号: ${B}${new_user}${N}"
+    log_info "新密码: ${B}${new_pass}${N}"
+    log_dim "面板入口: https://127.0.0.1:${port}/  (自签证书，浏览器需信任例外)"
+}
+
 _bar() {
     local val=$1 max=$2 w=${3:-20} fill_c="${4:-$C}" empty_c="${5:-$DM}"
     (( max == 0 )) && max=1
@@ -778,6 +873,7 @@ show_help() {
     printf "    ${W}update${N}      ${DM}检查并安装更新${N}\n"
     printf "    ${W}export${N}      ${DM}Docker：容器快照（docker commit+save）；裸机：目录文件${N}\n"
     printf "    ${W}import${N}      ${DM}恢复备份 ${DM}[foxwaf import <file>]${N}\n"
+    printf "    ${W}reset-auth${N}  ${DM}重置用户名/密码并热加载（无需重启）${N}\n"
     printf "    ${W}uninstall${N}   ${DM}卸载 FoxWAF${N}\n"
     printf "    ${W}version${N}     ${DM}显示版本号${N}\n"
     _gap
@@ -879,6 +975,7 @@ case "${1:-}" in
     update)    do_update ;;
     export)    do_export ;;
     import)    do_import "${2:-}" ;;
+    reset-auth|--reset-auth) do_reset_auth "${2:-fox}" "${3:-}" ;;
     uninstall) do_uninstall ;;
     version|-v|--version) do_version ;;
     -h|--help|help) show_help ;;
