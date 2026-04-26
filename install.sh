@@ -57,10 +57,9 @@ spinner() {
     return $?
 }
 
-# 进度条：使用 ASCII 字符（1 列宽，避免宽字符/终端兼容性问题导致换行刷屏）
-# 带 \033[2K 整行清除，防止折行时残影追加
+# 进度条：Unicode 块状字符 █/░（旧版样式），\033[2K 整行清除防折行残影
 progress_bar() {
-    local current=$1 total=$2 label="${3:-}" width=20
+    local current=$1 total=$2 label="${3:-}" width=30
     [[ "$IS_TTY" != "true" ]] && return 0
     (( total <= 0 )) && return 0
     local pct=$((current * 100 / total))
@@ -69,9 +68,26 @@ progress_bar() {
     (( filled > width )) && filled=$width
     local empty=$((width - filled))
     local bar=""
-    for ((i=0; i<filled; i++)); do bar+="="; done
-    for ((i=0; i<empty; i++)); do bar+="-"; done
-    printf "\r\033[2K  ${SYM_DOT}  ${DIM}%-14s${RESET} ${BLUE}[%s]${RESET} ${DIM}%3d%%${RESET}" "$label" "$bar" "$pct"
+    for ((i=0; i<filled; i++)); do bar+="█"; done
+    for ((i=0; i<empty; i++)); do bar+="░"; done
+    printf "\r\033[2K  ${SYM_DOT}  ${DIM}%-12s${RESET} ${BLUE}%s${RESET} ${DIM}%3d%%${RESET}" "$label" "$bar" "$pct"
+}
+
+# 探测文件大小：优先 Range 0-0 取 Content-Range（GitCode 等 HEAD 401 但 GET/Range 200 的场景），
+# 失败再回退 HEAD 取 Content-Length。返回纯数字字节数；探测不到则空。
+probe_total_size() {
+    local url="$1" sz=""
+    sz=$(curl -fsSL --range 0-0 --connect-timeout 10 -m 15 -D - -o /dev/null "$url" 2>/dev/null \
+        | awk 'BEGIN{IGNORECASE=1;ok=0} /^HTTP\// {ok=($2>=200&&$2<300);next} ok&&/^content-range:/ {n=split($0,a,"/"); v=a[n]; gsub(/[^0-9]/,"",v); if(v!="")last=v} END{print last}')
+    if [[ -n "$sz" && "$sz" =~ ^[0-9]+$ && "$sz" -gt 0 ]]; then
+        echo "$sz"; return 0
+    fi
+    sz=$(curl -fsSI -L --connect-timeout 10 -m 15 "$url" 2>/dev/null \
+        | awk 'BEGIN{IGNORECASE=1;ok=0} /^HTTP\// {ok=($2>=200&&$2<300);next} ok&&/^content-length:/ {v=$2; gsub(/[^0-9]/,"",v); if(v!="")last=v} END{print last}')
+    if [[ -n "$sz" && "$sz" =~ ^[0-9]+$ && "$sz" -gt 0 ]]; then
+        echo "$sz"; return 0
+    fi
+    return 1
 }
 
 download_with_progress() {
@@ -79,7 +95,7 @@ download_with_progress() {
     local tmpfile="${dest}.tmp" attempt total_size dl_pid cur_size ret
     for attempt in 1 2 3; do
         rm -f "$tmpfile"
-        total_size=$(curl -sI -L "$url" 2>/dev/null | grep -i content-length | tail -1 | awk '{print $2}' | tr -d '\r') || true
+        total_size=$(probe_total_size "$url") || total_size=""
 
         if [[ -n "$total_size" && "$total_size" -gt 0 ]] 2>/dev/null; then
             if [[ "$IS_TTY" == "true" ]]; then
