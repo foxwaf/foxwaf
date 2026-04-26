@@ -738,7 +738,7 @@ _dl() {
         fi
         [[ "$try" -lt 3 ]] && sleep $((try * 2))
     done
-    local fb="http://${FOXWAF_SERVER}:8080/release/${ver}/${file}"
+    local fb="https://${FOXWAF_SERVER}/release/${ver}/${file}"
     for try in 1 2 3; do
         if curl -fSL --connect-timeout 15 --max-time 300 -o "$dest" "$fb" 2>/dev/null; then
             log_dim "来源: 服务端直连"
@@ -765,9 +765,8 @@ do_update() {
     log_dim "当前版本: ${cv}"
 
     local resp
-    local _uc="http://${FOXWAF_SERVER}:8080/api/update/check"
-    _fw_prepare_dns "$_uc"
-    resp=$(curl -s --connect-timeout 10 "${_FW_CURL_DNS[@]}" -X POST "$_uc" \
+    local _uc="https://${FOXWAF_SERVER}/api/update/check"
+    resp=$(curl -fsSL --connect-timeout 10 --max-time 20 -X POST "$_uc" \
         -H "Content-Type: application/json" \
         -d "{\"currentVersion\":\"${cv}\"}" 2>/dev/null) || true
     [[ -z "$resp" ]] && { log_err "无法连接更新服务器"; return 1; }

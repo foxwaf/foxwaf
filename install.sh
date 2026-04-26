@@ -9,8 +9,8 @@ MODE=""
 MIRROR=""
 NO_START=false
 FOXWAF_SERVER="${FOXWAF_SERVER:-server.foxwaf.cn}"
-SERVER_API="http://${FOXWAF_SERVER}:8080/api/update/check"
-SERVER_DOWNLOAD="http://${FOXWAF_SERVER}:8080/release"
+SERVER_API="https://${FOXWAF_SERVER}/api/update/check"
+SERVER_DOWNLOAD="https://${FOXWAF_SERVER}/release"
 WAF_DEFAULT_PORT=8088
 
 MIRRORS_GITHUB="${MIRRORS_GITHUB:-https://github.com/foxwaf/foxwaf}"
