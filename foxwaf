@@ -86,6 +86,98 @@ confirm() {
 
 is_docker() { [[ -f "${INSTALL_DIR}/docker-compose.yml" || -f "${INSTALL_DIR}/docker-compose.yaml" ]]; }
 
+# ════════════════════════════════════════════════════════════════════════════
+# 版本来源（多层兜底）
+# ----------------------------------------------------------------------------
+# 历史问题：foxwaf version 与 foxwaf update "当前版本" 都读 ${INSTALL_DIR}/.version，
+# 但容器内 binary 经 in-process 更新后真实版本会与该文件错位（最严重时差 5 个 beta），
+# 导致 update 把容器降级到更老版本。
+#
+# 现在所有"当前版本"取值都走 _live_version()，优先级：
+#   1. /app/history/current（容器内）或 ${INSTALL_DIR}/history/current（裸机）
+#   2. 通过 docker exec 读容器内 .version（兜底）
+#   3. ${INSTALL_DIR}/.version（最后兜底，可能漂移）
+# ════════════════════════════════════════════════════════════════════════════
+
+# _live_version 返回 binary 真实运行版本。容器未运行时回退到本地文件并附标记。
+# 输出格式：'1.53beta'（成功）或 '1.48beta@stale'（fallback 标记）或空（完全失败）
+_live_version() {
+    local v=""
+    if is_docker; then
+        if docker inspect "$CONTAINER" &>/dev/null && \
+           [[ "$(docker inspect "$CONTAINER" --format '{{.State.Running}}' 2>/dev/null)" == "true" ]]; then
+            v=$(docker exec "$CONTAINER" cat /app/history/current 2>/dev/null | tr -d '[:space:]')
+            if [[ -z "$v" ]]; then
+                # 容器在跑但 history/current 缺失：尝试 .version
+                v=$(docker exec "$CONTAINER" cat /app/.version 2>/dev/null | tr -d '[:space:]')
+            fi
+            [[ -n "$v" ]] && { echo "$v"; return 0; }
+        fi
+    elif [[ -f "${INSTALL_DIR}/history/current" ]]; then
+        v=$(cat "${INSTALL_DIR}/history/current" 2>/dev/null | tr -d '[:space:]')
+        [[ -n "$v" ]] && { echo "$v"; return 0; }
+    fi
+    # 兜底：本地 .version 文件，但加 @stale 标记便于上层警告
+    if [[ -f "${INSTALL_DIR}/.version" ]]; then
+        v=$(cat "${INSTALL_DIR}/.version" 2>/dev/null | tr -d '[:space:]')
+        [[ -n "$v" ]] && { echo "${v}@stale"; return 0; }
+    fi
+    echo ""
+}
+
+# _live_version_clean 去掉 @stale 后缀的版本号
+_live_version_clean() {
+    local v="$1"
+    echo "${v%@stale}"
+}
+
+# _is_stale 判断版本字符串是否是 fallback 来源
+_is_stale() { [[ "$1" == *"@stale" ]]; }
+
+# _image_version 返回 docker image 名 :tag 中的版本部分；裸机或无 tag 时返回空
+_image_version() {
+    is_docker || return 0
+    docker inspect "$CONTAINER" --format '{{.Config.Image}}' 2>/dev/null | \
+        awk -F: '{print $NF}' | grep -E '^[0-9]+\.' || true
+}
+
+# ════════════════════════════════════════════════════════════════════════════
+# 语义化版本比较（支持 1.53beta、2.0.1 这类 tag）
+# 返回：0 = a == b，1 = a > b，-1 = a < b
+# 算法：取每段开头连续数字（1.53beta → [1,53]，2.0.1 → [2,0,1]），逐段比较；
+# 段数不同时短的补 0；纯数字相等且只有一边带 beta/alpha/rc 后缀视为后缀方更小（pre-release）。
+# ════════════════════════════════════════════════════════════════════════════
+_compare_version() {
+    local a="$1" b="$2"
+    [[ "$a" == "$b" ]] && { echo 0; return; }
+
+    # 解析数字段
+    local -a aa bb
+    IFS='.' read -ra _at <<< "$a"
+    IFS='.' read -ra _bt <<< "$b"
+
+    local i n=${#_at[@]} m=${#_bt[@]}
+    local maxlen=$(( n > m ? n : m ))
+    local has_pre_a=0 has_pre_b=0
+
+    for (( i=0; i<maxlen; i++ )); do
+        local pa="${_at[i]:-0}" pb="${_bt[i]:-0}"
+        local na nb
+        # 提取段开头数字
+        na=$(echo "$pa" | grep -oE '^[0-9]+' || echo 0)
+        nb=$(echo "$pb" | grep -oE '^[0-9]+' || echo 0)
+        # 是否带 beta/alpha/rc 等 pre-release 后缀
+        [[ "$pa" =~ [a-zA-Z]+ ]] && has_pre_a=1
+        [[ "$pb" =~ [a-zA-Z]+ ]] && has_pre_b=1
+        if (( na > nb )); then echo 1; return; fi
+        if (( na < nb )); then echo -1; return; fi
+    done
+    # 数字段全相同：带 pre-release 的版本视为更小（1.53 > 1.53beta）
+    if (( has_pre_a == 1 && has_pre_b == 0 )); then echo -1; return; fi
+    if (( has_pre_a == 0 && has_pre_b == 1 )); then echo 1; return; fi
+    echo 0
+}
+
 _ensure_compose_db_volume() {
     :
 }
@@ -454,6 +546,8 @@ do_status() {
         fi
     fi
 
+    local image_ver=""
+    local drift=0
     if [[ "$running" == "true" ]]; then
         local live_ver=""
         if is_docker; then
@@ -462,6 +556,13 @@ do_status() {
             live_ver=$(cat "${INSTALL_DIR}/history/current" 2>/dev/null | tr -d '[:space:]')
         fi
         [[ -n "$live_ver" ]] && ver="$live_ver"
+        # 漂移检测（F 项要求）：image tag 与 binary 真实版本对比
+        if is_docker && [[ -n "$img_name" ]]; then
+            image_ver=$(echo "$img_name" | awk -F: '{print $NF}' | grep -E '^[0-9]+\.' || true)
+            if [[ -n "$image_ver" && -n "$live_ver" && "$image_ver" != "$live_ver" ]]; then
+                drift=1
+            fi
+        fi
         conns_http=$(ss -tnp 2>/dev/null | awk '$4 ~ /:80$/ || $5 ~ /:80$/ {c++} END{print c+0}' 2>/dev/null || true)
         conns_https=$(ss -tnp 2>/dev/null | awk '$4 ~ /:443$/ || $5 ~ /:443$/ {c++} END{print c+0}' 2>/dev/null || true)
         conns_http=${conns_http:-0}
@@ -515,7 +616,13 @@ do_status() {
     if is_docker && [[ "$state_txt" == "容器不存在" ]]; then
         printf "    ${DM}说明${N}        ${DM}compose 在但容器已删；start 将重新创建${N}\n"
     fi
-    printf "    ${DM}Version${N}     ${B}${ver}${N}\n"
+    if (( drift == 1 )); then
+        # 容器内 binary 与镜像 tag 不一致 → 重启会回退到镜像版本，必须高亮警示
+        printf "    ${DM}Version${N}     ${B}${ver}${N}  ${Y}(container)${N}\n"
+        printf "    ${DM}Image Ver${N}   ${Y}${image_ver}${N}  ${Y}⚠ drift, restart reverts${N}\n"
+    else
+        printf "    ${DM}Version${N}     ${B}${ver}${N}\n"
+    fi
     printf "    ${DM}Mode${N}        ${W}${mode}${N}\n"
     [[ -n "$uptime" ]] && \
     printf "    ${DM}Uptime${N}      ${W}${uptime}${N}\n"
@@ -759,10 +866,38 @@ _md5ok() {
 }
 
 do_update() {
+    # 解析可选 --allow-downgrade（B 项要求）
+    local allow_downgrade=0
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            --allow-downgrade|-D) allow_downgrade=1 ;;
+        esac
+    done
+
     log_step "检查更新"
-    local cv="0.0.0"
-    [[ -f "${INSTALL_DIR}/.version" ]] && cv=$(cat "${INSTALL_DIR}/.version")
+
+    # ── 当前版本：必须用 binary 真实运行版本（A 项），不再用 .version 文件 ──
+    local cv_raw cv image_ver drift_msg=""
+    cv_raw=$(_live_version)
+    if [[ -z "$cv_raw" ]]; then
+        log_err "无法确定当前版本（容器未启动且无本地 .version）"
+        return 1
+    fi
+    cv=$(_live_version_clean "$cv_raw")
+    if _is_stale "$cv_raw"; then
+        log_warn "未连到容器，按本地缓存当作 ${cv}（实际可能更新）"
+    fi
     log_dim "当前版本: ${cv}"
+
+    # ── 镜像 tag 与 binary 漂移检查（F 项）──
+    if is_docker && ! _is_stale "$cv_raw"; then
+        image_ver=$(_image_version)
+        if [[ -n "$image_ver" && "$image_ver" != "$cv" ]]; then
+            log_warn "检测到漂移：image=${image_ver}，container=${cv}"
+            drift_msg="${Y}（重启会回退到 ${image_ver}）${N}"
+        fi
+    fi
 
     local resp
     local _uc="https://${FOXWAF_SERVER}/api/update/check"
@@ -775,6 +910,7 @@ do_update() {
     hu=$(echo "$resp" | grep -oP '"hasUpdate"\s*:\s*\K(true|false)' | head -1)
     if [[ "$hu" != "true" ]]; then
         log_ok "已是最新版本 ${B}${cv}${N}"
+        [[ -n "$drift_msg" ]] && log_warn "但镜像 tag 仍是旧版 ${image_ver}，建议手动 docker compose pull 同步"
         return 0
     fi
 
@@ -782,13 +918,34 @@ do_update() {
     nv=$(echo "$resp" | grep -oP '"version"\s*:\s*"[^"]*"' | head -1 | grep -oP '"[^"]*"$' | tr -d '"')
     ft=$(echo "$resp" | grep -oP '"features"\s*:\s*"[^"]*"' | head -1 | grep -oP '"[^"]*"$' | tr -d '"')
 
+    # ── 降级护栏（B 项）──
+    local cmp; cmp=$(_compare_version "$nv" "$cv")
+    if [[ "$cmp" == "0" ]]; then
+        log_ok "已是目标版本 ${B}${cv}${N}（远端建议 ${nv}，等价）"
+        return 0
+    fi
+    if [[ "$cmp" == "-1" ]]; then
+        if (( allow_downgrade == 1 )); then
+            log_warn "降级模式：${cv} → ${nv}（--allow-downgrade 已确认）"
+        else
+            log_err "拒绝降级：当前 ${cv} 高于远端目标 ${nv}"
+            log_dim "如确需降级，重新执行: foxwaf update --allow-downgrade"
+            return 1
+        fi
+    fi
+
     _gap
     printf "  ${C}${B}╭─────────────────────────────────────────╮${N}\n"
-    printf "  ${C}${B}│${N}  ${G}⬆${N}  新版本可用: ${B}%-24s${C}${B}│${N}\n" "$nv"
+    if [[ "$cmp" == "-1" ]]; then
+        printf "  ${C}${B}│${N}  ${R}⬇${N}  ${R}降级${N}: ${B}%-29s${N}${C}${B}│${N}\n" "$nv"
+    else
+        printf "  ${C}${B}│${N}  ${G}⬆${N}  新版本可用: ${B}%-24s${C}${B}│${N}\n" "$nv"
+    fi
     [[ -n "$ft" ]] && \
     printf "  ${C}${B}│${N}     ${DM}%-36s${N}${C}${B}│${N}\n" "$ft"
     printf "  ${C}${B}│${N}     ${DM}当前: %-30s${N}${C}${B}│${N}\n" "$cv"
     printf "  ${C}${B}╰─────────────────────────────────────────╯${N}\n"
+    [[ -n "$drift_msg" ]] && printf "    ${Y}注意${N}  漂移检测：%b\n" "$drift_msg"
     _gap
 
     confirm "立即更新？" || { log_dim "已取消"; return 0; }
@@ -812,7 +969,11 @@ do_update() {
             cd "$INSTALL_DIR" && docker compose up -d &>/dev/null &
             spinner $! "启动新版本" && printf "\r%60s\r" ""
             _gap
-            log_ok "更新完成  ${DM}${cv} → ${G}${B}${nv}${N}"
+            if [[ "$cmp" == "-1" ]]; then
+                log_ok "降级完成  ${DM}${cv} → ${R}${B}${nv}${N}"
+            else
+                log_ok "更新完成  ${DM}${cv} → ${G}${B}${nv}${N}"
+            fi
         else
             log_err "校验失败，已中止"
         fi
@@ -840,9 +1001,25 @@ do_uninstall() {
 }
 
 do_version() {
-    local v="unknown"
-    [[ -f "${INSTALL_DIR}/.version" ]] && v=$(cat "${INSTALL_DIR}/.version")
-    echo "FoxWAF ${v}"
+    local raw clean iv
+    raw=$(_live_version)
+    if [[ -z "$raw" ]]; then
+        echo "FoxWAF unknown"
+        return
+    fi
+    clean=$(_live_version_clean "$raw")
+    if _is_stale "$raw"; then
+        # 容器没起来，只能给本地文件值，明确告知用户这是缓存
+        echo "FoxWAF ${clean}  (image tag, container not running)"
+        return
+    fi
+    iv=$(_image_version)
+    if is_docker && [[ -n "$iv" && "$iv" != "$clean" ]]; then
+        # 漂移：binary 真实版本 vs 镜像 tag 不一致
+        printf 'FoxWAF %s  ${Y}(container)${N}  image: %s  ${Y}(drift, restart will revert)${N}\n' "$clean" "$iv"
+    else
+        echo "FoxWAF ${clean}"
+    fi
 }
 
 # ╔═══════════════════════════════════════════════════════════════╗
@@ -869,7 +1046,7 @@ show_help() {
     _gap
     printf "  ${C}${B}维护${N}\n"
     _gap
-    printf "    ${W}update${N}      ${DM}检查并安装更新${N}\n"
+    printf "    ${W}update${N}      ${DM}检查并安装更新 ${DM}[--allow-downgrade]${N}\n"
     printf "    ${W}export${N}      ${DM}Docker：容器快照（docker commit+save）；裸机：目录文件${N}\n"
     printf "    ${W}import${N}      ${DM}恢复备份 ${DM}[foxwaf import <file>]${N}\n"
     printf "    ${W}reset-auth${N}  ${DM}重置用户名/密码并热加载（无需重启）${N}\n"
@@ -920,48 +1097,24 @@ do_status_live() {
     trap '_status_live_cleanup; rm -f "$tmp"; exit 0' INT TERM HUP
     trap '_status_live_cleanup; rm -f "$tmp"'         EXIT
 
-    # ── 首帧：先正常输出，记录行数供后续回跳 ────────────────────
+    # ── 首帧：清屏到顶（\033[2J 清整屏 + \033[H 光标回左上）──
+    # 之前的 bug 在这里：只在循环里用相对回跳（\033[<N>A），但如果上一帧因终端高度不够而滚屏，
+    # 后续回跳就会落到错误位置，造成 banner 累加。改用绝对清屏 + 一次性渲染缓冲，无副作用。
+    printf '\033[2J\033[H'
     do_status 2>/dev/null >"$tmp"
     cat "$tmp"
     printf "  ${DM}Ctrl+C 退出  ·  每 0.5s 刷新${N}\n"
 
-    # 记录本次输出行数（含提示行）
-    local last_lines
-    last_lines=$(wc -l <"$tmp")
-    last_lines=$(( last_lines + 1 ))   # +1 for 提示行
-
-    # ── 刷新循环 ─────────────────────────────────────────────────
+    # ── 刷新循环（每帧绝对清屏 + 一次性输出，避免行数差异/滚屏导致的累加）──
     while true; do
         sleep 0.5
-
-        # 采集新内容
+        # 采集新内容（先写到 tmp，避免边采集边渲染的撕裂感）
         do_status 2>/dev/null >"$tmp"
-
-        local new_lines
-        new_lines=$(wc -l <"$tmp")
-        new_lines=$(( new_lines + 1 ))  # +1 for 提示行
-
-        # 回跳到上一帧起始行：用 \033[<N>A（光标上移 N 行）
-        printf "\033[%dA" "$last_lines"
-
-        # 逐行覆写（\033[2K 清整行，避免旧内容残留）
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            printf '\033[2K%s\n' "$line"
-        done <"$tmp"
-        printf '\033[2K'"  ${DM}Ctrl+C 退出  ·  每 0.5s 刷新${N}\n"
-
-        # 如果新帧比旧帧行数少（Running→Stopped 时资源块消失），
-        # 清除多余的旧行
-        if (( new_lines < last_lines )); then
-            local extra=$(( last_lines - new_lines ))
-            for (( i=0; i<extra; i++ )); do
-                printf '\033[2K\n'
-            done
-            # 再把光标拉回到内容末尾
-            printf "\033[%dA" "$extra"
-        fi
-
-        last_lines=$new_lines
+        # 绝对清屏到左上：终端再大或再小、frame 高度变化 都不会留残影
+        printf '\033[H\033[2J'
+        # 一次性 cat：终端绘制开销最低
+        cat "$tmp"
+        printf "  ${DM}Ctrl+C 退出  ·  每 0.5s 刷新${N}\n"
     done
 }
 
@@ -971,7 +1124,7 @@ case "${1:-}" in
     restart)   do_restart ;;
     status)    do_status_live ;;
     logs)      do_logs ;;
-    update)    do_update ;;
+    update)    shift; do_update "$@" ;;
     export)    do_export ;;
     import)    do_import "${2:-}" ;;
     reset-auth|--reset-auth) do_reset_auth "${2:-fox}" "${3:-}" ;;
