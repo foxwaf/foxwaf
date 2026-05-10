@@ -832,27 +832,131 @@ do_import() {
 # ║  更新系统                                                      ║
 # ╚═══════════════════════════════════════════════════════════════╝
 
-MIRRORS_GITHUB="https://github.com/foxwaf/foxwaf"
+# ════════════════════════════════════════════════════════════════════════════
+# 镜像下载体系（与 waf.go ensureCoreMirrors / downloadFromMirrors 同语义）
+#   1. 服务端 /api/update/check 下发 mirrors[]（do_update 阶段写入 MIRRORS_REMOTE）
+#   2. 与 MIRRORS_BUILTIN（GitHub/GitCode）按 platform 去重合并，远端优先
+#   3. 按 priority + 实测 RTT 排序，依次尝试
+#   4. 全部镜像失败 → 回退 https://${FOXWAF_SERVER}/release/<ver>/<file>
+# ════════════════════════════════════════════════════════════════════════════
 
-_dl() {
-    local file="$1" dest="$2" ver="$3"
-    local url try
-    url="${MIRRORS_GITHUB}/releases/download/v${ver}/${file}"
+MIRRORS_BUILTIN=(
+    "github|GitHub|https://github.com/foxwaf/foxwaf|1"
+    "gitcode|GitCode|https://gitcode.com/kabubu/foxwaf|2"
+)
+MIRRORS_REMOTE=()
+
+_parse_mirrors() {
+    local resp="$1"
+    MIRRORS_REMOTE=()
+    [[ -z "$resp" ]] && return 0
+    local arr items item name platform repo priority
+    arr=$(echo "$resp" | grep -oP '"mirrors"\s*:\s*\[\K[^\]]*' | head -1)
+    [[ -z "$arr" ]] && return 0
+    items=$(echo "$arr" | grep -oP '\{[^}]*\}')
+    while IFS= read -r item; do
+        [[ -z "$item" ]] && continue
+        name=$(echo "$item"     | grep -oP '"name"\s*:\s*"\K[^"]*'     | head -1)
+        platform=$(echo "$item" | grep -oP '"platform"\s*:\s*"\K[^"]*' | head -1)
+        repo=$(echo "$item"     | grep -oP '"repo"\s*:\s*"\K[^"]*'     | head -1)
+        priority=$(echo "$item" | grep -oP '"priority"\s*:\s*\K[0-9]+' | head -1)
+        [[ -z "$priority" ]] && priority=99
+        [[ -z "$repo" ]] && continue
+        MIRRORS_REMOTE+=("${platform}|${name}|${repo}|${priority}")
+    done <<< "$items"
+}
+
+_rtt_ms() {
+    local repo="$1" host t
+    host=$(echo "$repo" | sed -E 's|^https?://([^/:]+).*|\1|')
+    [[ -z "$host" ]] && { echo 9999; return; }
+    t=$(curl -o /dev/null -s -m 3 --connect-timeout 2 -w '%{time_connect}' "https://${host}/" 2>/dev/null)
+    if [[ -z "$t" || "$t" == "0.000000" ]]; then
+        t=$(curl -o /dev/null -s -m 3 --connect-timeout 2 -w '%{time_connect}' "http://${host}/" 2>/dev/null)
+    fi
+    if [[ -z "$t" || "$t" == "0.000000" ]]; then
+        echo 9999
+    else
+        awk "BEGIN{printf \"%d\", ${t}*1000}"
+    fi
+}
+
+_build_mirror_url() {
+    local platform="$1" repo="$2" version="$3" file="$4"
+    repo="${repo%/}"
+    case "$platform" in
+        gitcode)
+            local owner_repo
+            owner_repo=$(echo "$repo" | sed -E 's|^https?://[^/]+/||')
+            echo "https://api.gitcode.com/api/v5/repos/${owner_repo}/releases/v${version}/attach_files/${file}/download"
+            ;;
+        gitlab)
+            echo "${repo}/-/releases/v${version}/downloads/${file}"
+            ;;
+        *)
+            echo "${repo}/releases/download/v${version}/${file}"
+            ;;
+    esac
+}
+
+_sorted_mirrors() {
+    local m p
+    local -A seen=()
+    local merged=()
+    for m in "${MIRRORS_REMOTE[@]}"; do
+        p=$(echo "$m" | cut -d'|' -f1 | tr '[:upper:]' '[:lower:]')
+        [[ -n "$p" ]] && seen["$p"]=1
+        merged+=("$m")
+    done
+    for m in "${MIRRORS_BUILTIN[@]}"; do
+        p=$(echo "$m" | cut -d'|' -f1 | tr '[:upper:]' '[:lower:]')
+        [[ -n "${seen[$p]:-}" ]] && continue
+        merged+=("$m")
+    done
+    local entry priority repo rtt sortkey
+    for entry in "${merged[@]}"; do
+        priority=$(echo "$entry" | cut -d'|' -f4)
+        repo=$(echo "$entry"     | cut -d'|' -f3)
+        rtt=$(_rtt_ms "$repo")
+        sortkey=$(printf '%03d%05d' "${priority:-99}" "$rtt")
+        echo "${sortkey}|${entry}"
+    done | sort
+}
+
+# 单源下载：最多 3 次，指数退避
+_download_one() {
+    local url="$1" dest="$2" try
     for try in 1 2 3; do
         if curl -fSL --connect-timeout 15 --max-time 300 -o "$dest" "$url" 2>/dev/null; then
-            log_dim "来源: GitHub"
             return 0
         fi
         [[ "$try" -lt 3 ]] && sleep $((try * 2))
     done
+    return 1
+}
+
+# 替换原 _dl：按 mirrors 排序依次尝试，全失败回退服务端直链
+_dl() {
+    local file="$1" dest="$2" ver="$3"
+    local entry m platform name repo url
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        m="${entry#*|}"
+        platform=$(echo "$m" | cut -d'|' -f1)
+        name=$(echo "$m"     | cut -d'|' -f2)
+        repo=$(echo "$m"     | cut -d'|' -f3)
+        url=$(_build_mirror_url "$platform" "$repo" "$ver" "$file")
+        if _download_one "$url" "$dest"; then
+            log_dim "来源: ${name}"
+            return 0
+        fi
+    done < <(_sorted_mirrors)
+
     local fb="https://${FOXWAF_SERVER}/release/${ver}/${file}"
-    for try in 1 2 3; do
-        if curl -fSL --connect-timeout 15 --max-time 300 -o "$dest" "$fb" 2>/dev/null; then
-            log_dim "来源: 服务端直连"
-            return 0
-        fi
-        [[ "$try" -lt 3 ]] && sleep $((try * 2))
-    done
+    if _download_one "$fb" "$dest"; then
+        log_dim "来源: 服务端直链"
+        return 0
+    fi
     return 1
 }
 
@@ -905,6 +1009,12 @@ do_update() {
         -H "Content-Type: application/json" \
         -d "{\"currentVersion\":\"${cv}\"}" 2>/dev/null) || true
     [[ -z "$resp" ]] && { log_err "无法连接更新服务器"; return 1; }
+
+    # 解析服务端下发的 mirrors（与 waf.go 同语义：合并内置 GitHub/GitCode 兜底，按 priority+RTT 排序）
+    _parse_mirrors "$resp"
+    if [[ ${#MIRRORS_REMOTE[@]} -gt 0 ]]; then
+        log_dim "服务端下发 ${#MIRRORS_REMOTE[@]} 个镜像源"
+    fi
 
     local hu
     hu=$(echo "$resp" | grep -oP '"hasUpdate"\s*:\s*\K(true|false)' | head -1)
