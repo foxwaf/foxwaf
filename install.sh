@@ -13,7 +13,13 @@ SERVER_API="https://${FOXWAF_SERVER}/api/update/check"
 SERVER_DOWNLOAD="https://${FOXWAF_SERVER}/release"
 WAF_DEFAULT_PORT=8088
 
-MIRRORS_GITHUB="${MIRRORS_GITHUB:-https://github.com/foxwaf/foxwaf}"
+# 内置兜底镜像（platform|name|repo|priority；与 waf.go fallbackMirrorsBuiltin 一致）
+# 支持环境变量覆盖：MIRRORS_GITHUB / MIRRORS_GITCODE
+MIRRORS_BUILTIN=(
+    "github|GitHub|${MIRRORS_GITHUB:-https://github.com/foxwaf/foxwaf}|1"
+    "gitcode|GitCode|${MIRRORS_GITCODE:-https://gitcode.com/kabubu/foxwaf}|2"
+)
+MIRRORS_REMOTE=()  # 由 fetch_version 解析接口响应填充
 MIRRORS_GITHUB_RAW_FOXWAF="https://raw.githubusercontent.com/foxwaf/foxwaf/main/foxwaf"
 
 # ─── 颜色 & 符号 ────────────────────────────────────────────────────────────
@@ -250,49 +256,166 @@ detect_mode() {
 
 # ─── 版本获取 ────────────────────────────────────────────────────────────────
 fetch_version() {
-    [[ "$VERSION" != "latest" ]] && return
-    log_step "获取最新版本"
-    local resp attempt
+    log_step "获取版本信息"
+    local resp attempt cv
     resp=""
+    cv="${VERSION}"
+    [[ "$cv" == "latest" ]] && cv="0.0.0"
     for attempt in 1 2 3; do
         resp=$(curl -s --connect-timeout 10 -X POST "$SERVER_API" \
             -H "Content-Type: application/json" \
-            -d '{"currentVersion":"0.0.0"}' 2>/dev/null) || true
+            -d "{\"currentVersion\":\"${cv}\"}" 2>/dev/null) || true
         [[ -n "$resp" ]] && break
         sleep $((attempt * 2))
     done
+
     if [[ -n "$resp" ]]; then
-        local ver
-        ver=$(echo "$resp" | grep -oP '"version"\s*:\s*"[^"]*"' | head -1 | grep -oP '"[^"]*"$' | tr -d '"')
-        if [[ -n "$ver" ]]; then
-            VERSION="$ver"
-            log_ok "最新版本: ${BOLD}$VERSION${RESET}"
+        parse_mirrors_from_response "$resp"
+        if [[ ${#MIRRORS_REMOTE[@]} -gt 0 ]]; then
+            log_dim "服务端下发 ${#MIRRORS_REMOTE[@]} 个镜像源"
+        fi
+        if [[ "$VERSION" == "latest" ]]; then
+            local ver
+            ver=$(echo "$resp" | grep -oP '"version"\s*:\s*"[^"]*"' | head -1 | grep -oP '"[^"]*"$' | tr -d '"')
+            if [[ -n "$ver" ]]; then
+                VERSION="$ver"
+                log_ok "最新版本: ${BOLD}$VERSION${RESET}"
+                return
+            fi
+        else
+            log_ok "目标版本: ${BOLD}$VERSION${RESET}"
             return
         fi
     fi
-    die "无法获取版本信息（服务端不可达），请使用 --version 指定"
+
+    if [[ "$VERSION" == "latest" ]]; then
+        die "无法获取版本信息（服务端不可达），请使用 --version 指定"
+    else
+        log_warn "服务端不可达，仅使用内置兜底镜像下载 ${VERSION}"
+    fi
 }
 
 # ─── 下载 ────────────────────────────────────────────────────────────────────
-build_github_url() {
-    local ver="$1" file="$2"
-    echo "${MIRRORS_GITHUB}/releases/download/v${ver}/${file}"
+# ════════════════════════════════════════════════════════════════════════════
+# 镜像下载体系（与 waf.go ensureCoreMirrors / downloadFromMirrors 同语义）
+#   1. 服务端下发 mirrors[]（fetch_version 阶段写入 MIRRORS_REMOTE）
+#   2. 与 MIRRORS_BUILTIN（GitHub/GitCode）按 platform 去重合并，远端优先
+#   3. 按 priority + 实测 RTT 排序，依次尝试
+#   4. 全部镜像失败 → 回退服务端直链 fallback_url
+# ════════════════════════════════════════════════════════════════════════════
+
+parse_mirrors_from_response() {
+    local resp="$1"
+    MIRRORS_REMOTE=()
+    [[ -z "$resp" ]] && return 0
+    local arr items item name platform repo priority
+    arr=$(echo "$resp" | grep -oP '"mirrors"\s*:\s*\[\K[^\]]*' | head -1)
+    [[ -z "$arr" ]] && return 0
+    items=$(echo "$arr" | grep -oP '\{[^}]*\}')
+    while IFS= read -r item; do
+        [[ -z "$item" ]] && continue
+        name=$(echo "$item"     | grep -oP '"name"\s*:\s*"\K[^"]*'        | head -1)
+        platform=$(echo "$item" | grep -oP '"platform"\s*:\s*"\K[^"]*'    | head -1)
+        repo=$(echo "$item"     | grep -oP '"repo"\s*:\s*"\K[^"]*'        | head -1)
+        priority=$(echo "$item" | grep -oP '"priority"\s*:\s*\K[0-9]+'    | head -1)
+        [[ -z "$priority" ]] && priority=99
+        [[ -z "$repo" ]] && continue
+        MIRRORS_REMOTE+=("${platform}|${name}|${repo}|${priority}")
+    done <<< "$items"
+}
+
+# 测 host TCP 连接耗时（毫秒）；DNS/连接失败返回 9999
+measure_rtt_ms() {
+    local repo="$1" host t
+    host=$(echo "$repo" | sed -E 's|^https?://([^/:]+).*|\1|')
+    [[ -z "$host" ]] && { echo 9999; return; }
+    t=$(curl -o /dev/null -s -m 3 --connect-timeout 2 -w '%{time_connect}' "https://${host}/" 2>/dev/null)
+    if [[ -z "$t" || "$t" == "0.000000" ]]; then
+        t=$(curl -o /dev/null -s -m 3 --connect-timeout 2 -w '%{time_connect}' "http://${host}/" 2>/dev/null)
+    fi
+    if [[ -z "$t" || "$t" == "0.000000" ]]; then
+        echo 9999
+    else
+        awk "BEGIN{printf \"%d\", ${t}*1000}"
+    fi
+}
+
+# 按 platform 拼下载 URL（与 waf.go buildMirrorDownloadURL 完全一致）
+build_mirror_url() {
+    local platform="$1" repo="$2" version="$3" file="$4"
+    repo="${repo%/}"
+    case "$platform" in
+        gitcode)
+            local owner_repo
+            owner_repo=$(echo "$repo" | sed -E 's|^https?://[^/]+/||')
+            echo "https://api.gitcode.com/api/v5/repos/${owner_repo}/releases/v${version}/attach_files/${file}/download"
+            ;;
+        gitlab)
+            echo "${repo}/-/releases/v${version}/downloads/${file}"
+            ;;
+        *)
+            echo "${repo}/releases/download/v${version}/${file}"
+            ;;
+    esac
+}
+
+# 合并 MIRRORS_REMOTE + MIRRORS_BUILTIN（platform 去重，远端优先），按 priority+RTT 排序输出
+# stdout：每行 "sortkey|platform|name|repo|priority"
+sorted_mirrors() {
+    local m p
+    local -A seen=()
+    local merged=()
+    for m in "${MIRRORS_REMOTE[@]}"; do
+        p=$(echo "$m" | cut -d'|' -f1 | tr '[:upper:]' '[:lower:]')
+        [[ -n "$p" ]] && seen["$p"]=1
+        merged+=("$m")
+    done
+    for m in "${MIRRORS_BUILTIN[@]}"; do
+        p=$(echo "$m" | cut -d'|' -f1 | tr '[:upper:]' '[:lower:]')
+        [[ -n "${seen[$p]:-}" ]] && continue
+        merged+=("$m")
+    done
+
+    local entry priority repo rtt sortkey
+    for entry in "${merged[@]}"; do
+        priority=$(echo "$entry" | cut -d'|' -f4)
+        repo=$(echo "$entry" | cut -d'|' -f3)
+        rtt=$(measure_rtt_ms "$repo")
+        sortkey=$(printf '%03d%05d' "${priority:-99}" "$rtt")
+        echo "${sortkey}|${entry}"
+    done | sort
+}
+
+# 按合并去重排序后的镜像依次下载，全失败回退 fallback_url
+mirror_download() {
+    local file="$1" dest="$2" ver="$3" fallback_url="${4:-}" label="${5:-$file}"
+    local entry m platform name repo url
+    while IFS= read -r entry; do
+        [[ -z "$entry" ]] && continue
+        m="${entry#*|}"
+        platform=$(echo "$m" | cut -d'|' -f1)
+        name=$(echo "$m"     | cut -d'|' -f2)
+        repo=$(echo "$m"     | cut -d'|' -f3)
+        url=$(build_mirror_url "$platform" "$repo" "$ver" "$file")
+        if download_with_progress "$url" "$dest" "${label}（${name}）"; then
+            log_dim "来源: ${name}"
+            return 0
+        fi
+    done < <(sorted_mirrors)
+
+    if [[ -n "$fallback_url" ]]; then
+        if download_with_progress "$fallback_url" "$dest" "${label}（服务端）"; then
+            log_dim "来源: 服务端直链"
+            return 0
+        fi
+    fi
+    return 1
 }
 
 download_file() {
     local file="$1" dest="$2" ver="$3" label="${4:-$1}"
-    local url
-    url=$(build_github_url "$ver" "$file")
-    if download_with_progress "$url" "$dest" "$label"; then
-        log_dim "来源: GitHub"
-        return 0
-    fi
     local fb="${SERVER_DOWNLOAD}/${ver}/${file}"
-    if download_with_progress "$fb" "$dest" "$label"; then
-        log_dim "来源: 服务端(兜底)"
-        return 0
-    fi
-    return 1
+    mirror_download "$file" "$dest" "$ver" "$fb" "$label"
 }
 
 verify_md5() {
@@ -306,18 +429,8 @@ verify_md5() {
 
 download_foxwaf_image_bundle() {
     local tmp="$1" ver="$2"
-    local url
-    url=$(build_github_url "$ver" "foxwaf-image.tar.gz")
-    if download_with_progress "$url" "${tmp}/image.tar.gz" "Docker 镜像"; then
-        log_dim "来源: GitHub"
-        return 0
-    fi
     local fb="${SERVER_DOWNLOAD}/${ver}/foxwaf-image.tar.gz"
-    if download_with_progress "$fb" "${tmp}/image.tar.gz" "Docker 镜像(服务端)"; then
-        log_dim "来源: 服务端(兜底)"
-        return 0
-    fi
-    return 1
+    mirror_download "foxwaf-image.tar.gz" "${tmp}/image.tar.gz" "$ver" "$fb" "Docker 镜像"
 }
 
 # ─── Docker 模式安装 ─────────────────────────────────────────────────────────
