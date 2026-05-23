@@ -466,6 +466,29 @@ install_docker() {
 
     log_step "配置"
     mkdir -p "$INSTALL_DIR/data"
+    if [[ -d "$INSTALL_DIR/conf.yaml" ]]; then
+        local bad_conf
+        bad_conf="$INSTALL_DIR/conf.yaml.bad.$(date +%Y%m%d%H%M%S)"
+        mv "$INSTALL_DIR/conf.yaml" "$bad_conf" 2>/dev/null || true
+        log_warn "检测到 conf.yaml 是目录，已移到 $bad_conf"
+    fi
+    if [[ ! -f "$INSTALL_DIR/conf.yaml" || ! -s "$INSTALL_DIR/conf.yaml" ]] && docker inspect foxwaf &>/dev/null; then
+        if docker cp foxwaf:/app/conf.yaml "$INSTALL_DIR/conf.yaml" 2>/dev/null && [[ -f "$INSTALL_DIR/conf.yaml" && -s "$INSTALL_DIR/conf.yaml" ]]; then
+            log_ok "已保存现有 conf.yaml"
+        fi
+    fi
+    if [[ ! -f "$INSTALL_DIR/conf.yaml" || ! -s "$INSTALL_DIR/conf.yaml" ]]; then
+        local cid
+        cid=$(docker create "foxwaf:${VERSION}" 2>/dev/null) || die "无法从镜像生成默认 conf.yaml"
+        if ! docker cp "$cid:/app/conf.yaml" "$INSTALL_DIR/conf.yaml" 2>/dev/null || [[ ! -f "$INSTALL_DIR/conf.yaml" || ! -s "$INSTALL_DIR/conf.yaml" ]]; then
+            docker rm "$cid" &>/dev/null || true
+            die "无法生成默认 conf.yaml"
+        fi
+        docker rm "$cid" &>/dev/null || true
+        log_ok "默认 conf.yaml 已持久化"
+    else
+        log_dim "保留配置: $INSTALL_DIR/conf.yaml"
+    fi
     cat > "$INSTALL_DIR/docker-compose.yml" << DEOF
 services:
   foxwaf:
@@ -474,9 +497,10 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
+      - ./conf.yaml:/app/conf.yaml
       - ./data:/app/data
 DEOF
-    log_ok "Compose 配置已生成（数据库/授权持久化在 data/ 卷）"
+    log_ok "Compose 配置已生成（conf.yaml 与 data/ 已持久化）"
     echo "$VERSION" > "$INSTALL_DIR/.version"
     install_foxwaf_bin
 

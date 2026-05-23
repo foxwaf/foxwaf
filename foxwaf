@@ -14,6 +14,8 @@ R=$'\033[38;5;203m'  G=$'\033[38;5;114m'  Y=$'\033[38;5;221m'  C=$'\033[38;5;75m
 M=$'\033[38;5;183m'  W=$'\033[38;5;252m'  DM=$'\033[38;5;243m' D=$'\033[2m'
 B=$'\033[1m'         U=$'\033[4m'         N=$'\033[0m'
 BG_OK=$'\033[48;5;22m'  BG_ERR=$'\033[48;5;52m'  BG_WARN=$'\033[48;5;58m'
+IS_TTY=false
+[[ -t 1 ]] && IS_TTY=true
 
 # ── 输出组件 ─────────────────────────────────────────────────────
 _line() { printf "  ${DM}%s${N}\n" "$(printf '─%.0s' {1..58})"; }
@@ -69,12 +71,77 @@ spinner() {
 
 progress_bar() {
     local cur=$1 tot=$2 label="${3:-}" w=30
-    (( tot == 0 )) && tot=1
-    local pct=$((cur*100/tot)) filled=$((cur*w/tot)) empty=$((w-filled))
+    [[ "$IS_TTY" != "true" ]] && return 0
+    (( tot <= 0 )) && return 0
+    local pct=$((cur*100/tot))
+    (( pct > 100 )) && pct=100
+    local filled=$((cur*w/tot))
+    (( filled > w )) && filled=$w
+    local empty=$((w-filled))
     local bar=""
-    for ((i=0;i<filled;i++)); do bar+="━"; done
-    for ((i=0;i<empty;i++)); do bar+="╌"; done
-    printf "\r  ${DM}%s${N}  ${C}%s${DM}%s${N}  ${W}%3d%%${N}" "$label" "${bar:0:$filled}" "${bar:$filled}" "$pct"
+    for ((i=0;i<filled;i++)); do bar+="█"; done
+    for ((i=0;i<empty;i++)); do bar+="░"; done
+    printf "\r\033[2K  ${DM}·${N}  ${DM}%-12s${N} ${C}%s${N} ${DM}%3d%%${N}" "$label" "$bar" "$pct"
+}
+
+probe_total_size() {
+    local url="$1" sz=""
+    sz=$(curl -fsSL --range 0-0 --connect-timeout 10 -m 15 -D - -o /dev/null "$url" 2>/dev/null \
+        | awk 'BEGIN{IGNORECASE=1;ok=0} /^HTTP\// {ok=($2>=200&&$2<300);next} ok&&/^content-range:/ {n=split($0,a,"/"); v=a[n]; gsub(/[^0-9]/,"",v); if(v!="")last=v} END{print last}')
+    if [[ -n "$sz" && "$sz" =~ ^[0-9]+$ && "$sz" -gt 0 ]]; then
+        echo "$sz"; return 0
+    fi
+    sz=$(curl -fsSI -L --connect-timeout 10 -m 15 "$url" 2>/dev/null \
+        | awk 'BEGIN{IGNORECASE=1;ok=0} /^HTTP\// {ok=($2>=200&&$2<300);next} ok&&/^content-length:/ {v=$2; gsub(/[^0-9]/,"",v); if(v!="")last=v} END{print last}')
+    if [[ -n "$sz" && "$sz" =~ ^[0-9]+$ && "$sz" -gt 0 ]]; then
+        echo "$sz"; return 0
+    fi
+    return 1
+}
+
+download_with_progress() {
+    local url="$1" dest="$2" label="${3:-下载中}"
+    local tmpfile="${dest}.tmp" attempt total_size dl_pid cur_size ret
+    for attempt in 1 2 3; do
+        rm -f "$tmpfile"
+        total_size=$(probe_total_size "$url") || total_size=""
+        if [[ -n "$total_size" && "$total_size" -gt 0 ]] 2>/dev/null; then
+            if [[ "$IS_TTY" == "true" ]]; then
+                curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
+                dl_pid=$!
+                while kill -0 "$dl_pid" 2>/dev/null; do
+                    [[ -f "$tmpfile" ]] && cur_size=$(stat -c%s "$tmpfile" 2>/dev/null || echo 0) && progress_bar "$cur_size" "$total_size" "$label"
+                    sleep 0.3
+                done
+                wait "$dl_pid" 2>/dev/null
+                ret=$?
+                if [[ $ret -eq 0 ]]; then
+                    progress_bar "$total_size" "$total_size" "$label"
+                    echo ""
+                    mv "$tmpfile" "$dest"
+                    return 0
+                fi
+            else
+                log_dim "${label} ($((total_size / 1024 / 1024)) MB)..."
+                if curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null; then
+                    mv "$tmpfile" "$dest"
+                    return 0
+                fi
+            fi
+        else
+            curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
+            spinner $! "$label"
+            ret=$?
+            if [[ $ret -eq 0 && -f "$tmpfile" ]]; then
+                [[ "$IS_TTY" == "true" ]] && echo ""
+                mv "$tmpfile" "$dest"
+                return 0
+            fi
+        fi
+        rm -f "$tmpfile"
+        [[ "$attempt" -lt 3 ]] && sleep $((attempt * 2))
+    done
+    return 1
 }
 
 confirm() {
@@ -180,6 +247,58 @@ _compare_version() {
 
 _ensure_compose_db_volume() {
     :
+}
+
+_write_docker_compose() {
+    local f="$1" image="$2"
+    [[ -z "$f" ]] && f="${INSTALL_DIR}/docker-compose.yml"
+    [[ -z "$image" ]] && image="foxwaf:latest"
+    mkdir -p "$(dirname "$f")" "${INSTALL_DIR}/data"
+    cat > "$f" << DEOF
+services:
+  foxwaf:
+    image: ${image}
+    container_name: foxwaf
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./conf.yaml:/app/conf.yaml
+      - ./data:/app/data
+DEOF
+}
+
+_preserve_runtime_conf() {
+    mkdir -p "$INSTALL_DIR"
+    if [[ -d "${INSTALL_DIR}/conf.yaml" ]]; then
+        local bad="${INSTALL_DIR}/conf.yaml.bad.$(date +%Y%m%d%H%M%S)"
+        mv "${INSTALL_DIR}/conf.yaml" "$bad" 2>/dev/null || true
+        log_warn "检测到 conf.yaml 是目录，已移到 ${bad}"
+    fi
+    if [[ -f "${INSTALL_DIR}/conf.yaml" && -s "${INSTALL_DIR}/conf.yaml" ]]; then
+        log_dim "保留配置: ${INSTALL_DIR}/conf.yaml"
+        return 0
+    fi
+    if docker inspect "$CONTAINER" &>/dev/null; then
+        if docker cp "${CONTAINER}:/app/conf.yaml" "${INSTALL_DIR}/conf.yaml" 2>/dev/null && [[ -f "${INSTALL_DIR}/conf.yaml" && -s "${INSTALL_DIR}/conf.yaml" ]]; then
+            log_ok "已保存当前配置 conf.yaml"
+            return 0
+        fi
+    fi
+    log_err "未找到可持久化的 conf.yaml，已中止，避免账号/入口/端口回默认"
+    log_dim "请先执行 foxwaf start 后重试，或手动放置 ${INSTALL_DIR}/conf.yaml"
+    return 1
+}
+
+_install_cli_update() {
+    local src="$1" dst
+    [[ -s "$src" ]] || return 0
+    head -1 "$src" | grep -q '^#!/bin/bash' || return 0
+    dst=$(command -v foxwaf 2>/dev/null || true)
+    [[ -z "$dst" ]] && dst="/usr/local/bin/foxwaf"
+    cp -f "$src" "$dst" 2>/dev/null || return 0
+    chmod +x "$dst" 2>/dev/null || true
+    sed -i "s|^INSTALL_DIR=.*|INSTALL_DIR=\"${INSTALL_DIR}\"|" "$dst" 2>/dev/null || true
+    log_dim "管理工具已同步: ${dst}"
 }
 
 _compose_set_image() {
@@ -423,8 +542,13 @@ do_status() {
     local net_rx_disp="" net_tx_disp=""
     local conns_http=0 conns_https=0 port="" entry="" img_name="" img_size=""
 
-    port=$(awk '/^\s*Port:/{print $2; exit}' "${INSTALL_DIR}/conf.yaml" 2>/dev/null)
-    entry=$(awk '/^\s*secureentry:/{print $2; exit}' "${INSTALL_DIR}/conf.yaml" 2>/dev/null)
+    if [[ -f "${INSTALL_DIR}/conf.yaml" ]]; then
+        port=$(awk '/^\s*Port:/{print $2; exit}' "${INSTALL_DIR}/conf.yaml" 2>/dev/null)
+        entry=$(awk '/^\s*secureentry:/{print $2; exit}' "${INSTALL_DIR}/conf.yaml" 2>/dev/null)
+    elif is_docker && docker inspect "$CONTAINER" &>/dev/null; then
+        port=$(docker exec "$CONTAINER" sh -c "awk '/^[[:space:]]*Port:/{print \$2; exit}' /app/conf.yaml" 2>/dev/null)
+        entry=$(docker exec "$CONTAINER" sh -c "awk '/^[[:space:]]*secureentry:/{print \$2; exit}' /app/conf.yaml" 2>/dev/null)
+    fi
     [[ -z "$port" ]] && port=8088
 
     if is_docker; then
@@ -925,19 +1049,13 @@ _sorted_mirrors() {
 
 # 单源下载：最多 3 次，指数退避
 _download_one() {
-    local url="$1" dest="$2" try
-    for try in 1 2 3; do
-        if curl -fSL --connect-timeout 15 --max-time 300 -o "$dest" "$url" 2>/dev/null; then
-            return 0
-        fi
-        [[ "$try" -lt 3 ]] && sleep $((try * 2))
-    done
-    return 1
+    local url="$1" dest="$2" label="${3:-下载中}"
+    download_with_progress "$url" "$dest" "$label"
 }
 
 # 替换原 _dl：按 mirrors 排序依次尝试，全失败回退服务端直链
 _dl() {
-    local file="$1" dest="$2" ver="$3"
+    local file="$1" dest="$2" ver="$3" label="${4:-$1}"
     local entry m platform name repo url
     while IFS= read -r entry; do
         [[ -z "$entry" ]] && continue
@@ -946,14 +1064,14 @@ _dl() {
         name=$(echo "$m"     | cut -d'|' -f2)
         repo=$(echo "$m"     | cut -d'|' -f3)
         url=$(_build_mirror_url "$platform" "$repo" "$ver" "$file")
-        if _download_one "$url" "$dest"; then
+        if _download_one "$url" "$dest" "${label}（${name}）"; then
             log_dim "来源: ${name}"
             return 0
         fi
     done < <(_sorted_mirrors)
 
     local fb="https://${FOXWAF_SERVER}/release/${ver}/${file}"
-    if _download_one "$fb" "$dest"; then
+    if _download_one "$fb" "$dest" "${label}（服务端）"; then
         log_dim "来源: 服务端直链"
         return 0
     fi
@@ -1063,8 +1181,9 @@ do_update() {
     local tmp; tmp=$(mktemp -d)
 
     log_step "下载 Docker 镜像"
-    if _dl "foxwaf-image.tar.gz" "${tmp}/img.tar.gz" "$nv"; then
-        _dl "foxwaf-image.tar.gz.md5" "${tmp}/img.md5" "$nv" 2>/dev/null || true
+    if _dl "foxwaf-image.tar.gz" "${tmp}/img.tar.gz" "$nv" "Docker 镜像"; then
+        _dl "foxwaf-image.tar.gz.md5" "${tmp}/img.md5" "$nv" "镜像校验" 2>/dev/null || true
+        _dl "foxwaf" "${tmp}/foxwaf.new" "$nv" "管理工具" 2>/dev/null || true
         if _md5ok "${tmp}/img.tar.gz" "${tmp}/img.md5"; then
             log_ok "校验通过"
             log_step "安装更新"
@@ -1072,12 +1191,21 @@ do_update() {
             if spinner $! "导入镜像"; then
                 printf "\r%60s\r" ""
             fi
-            _dl "docker-compose.yaml" "${INSTALL_DIR}/docker-compose.yml" "$nv" 2>/dev/null || true
+            if ! _preserve_runtime_conf; then
+                rm -rf "$tmp"
+                return 1
+            fi
+            local compose_f
+            compose_f=$(_compose_file)
+            [[ -z "$compose_f" ]] && compose_f="${INSTALL_DIR}/docker-compose.yml"
+            _write_docker_compose "$compose_f" "foxwaf:${nv}"
+            log_dim "配置已持久化: conf.yaml / data"
             cd "$INSTALL_DIR" && docker compose down &>/dev/null || docker stop "$CONTAINER" &>/dev/null || true
             docker rm "$CONTAINER" &>/dev/null || true
             echo "$nv" > "${INSTALL_DIR}/.version"
             cd "$INSTALL_DIR" && docker compose up -d &>/dev/null &
             spinner $! "启动新版本" && printf "\r%60s\r" ""
+            _install_cli_update "${tmp}/foxwaf.new"
             _gap
             if [[ "$cmp" == "-1" ]]; then
                 log_ok "降级完成  ${DM}${cv} → ${R}${B}${nv}${N}"
