@@ -407,10 +407,11 @@ Update:
     MaxBackupDays: 0
 secureentry: fox
 username: fox
-password: fox
+password: ""
+password_salt: ""
 ```
 
-> ⚠️ **安装后请立即修改默认密码**（默认账号 `fox` / `fox`）
+> ⚠️ 首次启动会随机生成管理员密码，并以 `SHA256+salt` 写入 `conf.yaml`。请通过 `foxwaf logs` 查看“初始随机密码”，登录后及时修改。
 
 更多配置通过管理面板操作。
 
