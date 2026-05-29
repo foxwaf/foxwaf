@@ -8,6 +8,7 @@ VERSION="latest"
 MODE=""
 MIRROR=""
 NO_START=false
+FRESH_DEFAULT_CONF=false
 FOXWAF_SERVER="${FOXWAF_SERVER:-server.foxwaf.cn}"
 SERVER_API="https://${FOXWAF_SERVER}/api/update/check"
 SERVER_DOWNLOAD="https://${FOXWAF_SERVER}/release"
@@ -486,6 +487,7 @@ install_docker() {
         fi
         docker rm "$cid" &>/dev/null || true
         log_ok "默认 conf.yaml 已持久化"
+        FRESH_DEFAULT_CONF=true
     else
         log_dim "保留配置: $INSTALL_DIR/conf.yaml"
     fi
@@ -604,16 +606,19 @@ do_uninstall() {
 
 # ─── 安装完成 ────────────────────────────────────────────────────────────────
 print_success() {
-    local port entry
+    local port entry admin_user
     if [[ -f "$INSTALL_DIR/conf.yaml" ]]; then
         port=$(grep -i '^\s*Port:' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1 | awk '{print $2}')
         entry=$(grep -i '^\s*secureentry:' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1 | awk '{print $2}')
+        admin_user=$(grep -i '^\s*username:' "$INSTALL_DIR/conf.yaml" 2>/dev/null | head -1 | awk '{print $2}')
     elif docker exec foxwaf test -f /app/conf.yaml 2>/dev/null; then
         port=$(docker exec foxwaf grep -i '^\s*Port:' /app/conf.yaml 2>/dev/null | head -1 | awk '{print $2}' || true)
         entry=$(docker exec foxwaf grep -i '^\s*secureentry:' /app/conf.yaml 2>/dev/null | head -1 | awk '{print $2}' || true)
+        admin_user=$(docker exec foxwaf grep -i '^\s*username:' /app/conf.yaml 2>/dev/null | head -1 | awk '{print $2}' || true)
     fi
     port="${port:-$WAF_DEFAULT_PORT}"
     entry="${entry:-fox}"
+    admin_user="${admin_user:-fox}"
 
     echo ""
     echo -e "  ${GREEN}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
@@ -625,7 +630,16 @@ print_success() {
     echo -e "  ${DIM}模式${RESET}      $MODE"
     [[ -n "$port" ]] && echo -e "  ${DIM}面板${RESET}      http://<IP>:${port}/${entry:-foxadmin}"
     echo ""
-    echo -e "  ${DIM}账号${RESET}      fox / fox  ${RED}${BOLD}← 请立即修改${RESET}"
+    echo -e "  ${DIM}账号${RESET}      ${admin_user}"
+    if [[ "$FRESH_DEFAULT_CONF" == "true" ]]; then
+        if [[ "$NO_START" == "true" ]]; then
+            echo -e "  ${DIM}密码${RESET}      首次启动时随机生成，请用 ${BOLD}foxwaf logs${RESET} 查看“初始随机密码”"
+        else
+            echo -e "  ${DIM}密码${RESET}      已随机生成，请用 ${BOLD}foxwaf logs${RESET} 查看“初始随机密码”"
+        fi
+    else
+        echo -e "  ${DIM}密码${RESET}      已保留现有 conf.yaml 配置，安装器不显示密码"
+    fi
     echo ""
     echo -e "  ${DIM}常用命令:${RESET}"
     echo -e "    foxwaf status     ${DIM}运行状态${RESET}"

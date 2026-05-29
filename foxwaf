@@ -437,7 +437,7 @@ do_reset_auth() {
     body=$(printf '{"username":"%s","password":"%s"}' "$(_json_escape "$new_user")" "$(_json_escape "$new_pass")")
 
     # 8088 强制 HTTPS 自签证书 → -k 跳过校验；
-    # WAF 内部接口同时更新内存账户与 conf.yaml，无需额外操作。
+    # WAF 内部接口同时更新内存账户与 conf.yaml，口令按 SHA256+salt 保存，无需额外操作。
     # 注意：--resolve + Host: 127.0.0.1 强制走 loopback 直连，
     #       同时显式不带任何 X-Forwarded-* 头，满足 WAF 的本地白名单防护。
     local resp http_code
@@ -1287,7 +1287,7 @@ show_help() {
     printf "    ${W}update${N}      ${DM}检查并安装更新 ${DM}[--allow-downgrade]${N}\n"
     printf "    ${W}export${N}      ${DM}Docker：容器快照（docker commit+save）；裸机：目录文件${N}\n"
     printf "    ${W}import${N}      ${DM}恢复备份 ${DM}[foxwaf import <file>]${N}\n"
-    printf "    ${W}reset-auth${N}  ${DM}重置用户名/密码并热加载（无需重启）${N}\n"
+    printf "    ${W}reset-auth${N}  ${DM}重置用户名/密码，写入 SHA256+salt 并热加载（无需重启）${N}\n"
     printf "    ${W}uninstall${N}   ${DM}卸载 FoxWAF${N}\n"
     printf "    ${W}version${N}     ${DM}显示版本号${N}\n"
     _gap
