@@ -20,8 +20,6 @@
 
 ## 📖 概述
 
-> **⚠️ 本项目目前处于开发测试阶段，服务端功能将逐步开放，敬请关注。**
-
 FoxWAF 是一款**纯 Go 开发**的 Web 应用防火墙，以**单文件、零依赖**的设计理念，为中小型网站提供企业级安全防护。
 
 **核心理念：一切皆可热加载，无需重启，保证业务零中断。** 站点配置、安全规则、ACL 策略、CC 防护、插件、证书 —— 所有变更即时生效，不丢失任何连接，不中断任何请求。
@@ -271,7 +269,7 @@ Transfer/sec:      0.91GB
 ### 一键安装（推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/foxwaf/foxwaf/main/install.sh | bash -s -- --version 1.4.3
+curl -fsSL https://server.foxwaf.cn/install.sh | bash
 ```
 
 安装脚本会自动检测环境、下载 Docker 镜像、配置并启动服务。
