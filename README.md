@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://www.foxwaf.cn">
-    <img src="./favicon.ico" width="92" height="92" alt="FOXWAF Logo"/>
+    <img src="./foxlogo.svg" width="110" alt="FOXWAF Logo"/>
   </a>
 </p>
 
