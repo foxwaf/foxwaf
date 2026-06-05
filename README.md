@@ -13,21 +13,21 @@
   <br>
   <sub>Lightweight High-Performance Web Application Firewall — Pure Go, Hot-Reload Everything</sub>
   <br><br>
-  <a href="https://www.foxwaf.cn"><img src="./badges/website.svg" alt="Official Website"/></a>
-  <a href="https://www.foxwaf.cn/docs/index.html"><img src="./badges/documentation.svg" alt="Documentation"/></a>
-  <a href="https://www.foxwaf.cn/releases.html"><img src="./badges/releases.svg" alt="Releases"/></a>
-  <a href="https://www.foxwaf.cn/announcements.html"><img src="./badges/notice.svg" alt="Notice"/></a>
-  <a href="https://github.com/foxwaf/foxwaf"><img src="./badges/github.svg" alt="GitHub Repository"/></a>
-  <a href="https://gitcode.com/kabubu/foxwaf"><img src="./badges/gitcode.svg" alt="GitCode Mirror"/></a>
+  <a href="https://www.foxwaf.cn"><img src="badges/website.png" height="20" alt="Official Website"/></a>
+  <a href="https://www.foxwaf.cn/docs/index.html"><img src="badges/documentation.png" height="20" alt="Documentation"/></a>
+  <a href="https://www.foxwaf.cn/releases.html"><img src="badges/releases.png" height="20" alt="Releases"/></a>
+  <a href="https://www.foxwaf.cn/announcements.html"><img src="badges/notice.png" height="20" alt="Notice"/></a>
+  <a href="https://github.com/foxwaf/foxwaf"><img src="badges/github.png" height="20" alt="GitHub Repository"/></a>
+  <a href="https://gitcode.com/kabubu/foxwaf"><img src="badges/gitcode.png" height="20" alt="GitCode Mirror"/></a>
   <br>
-  <a href="#-快速开始"><img src="./badges/quick-start.svg" alt="Quick Start"/></a>
-  <img src="./badges/pure-go.svg" alt="Go"/>
-  <img src="./badges/hot-reload.svg" alt="Hot Reload"/>
-  <img src="./badges/docker.svg" alt="Docker"/>
-  <img src="./badges/license.svg" alt="License"/>
-  <img src="./badges/linux.svg" alt="Linux"/>
-  <img src="./badges/http2.svg" alt="HTTP/2"/>
-  <img src="./badges/gmtls.svg" alt="GMTLS"/>
+  <a href="#-快速开始"><img src="badges/quick-start.png" height="20" alt="Quick Start"/></a>
+  <img src="badges/pure-go.png" height="20" alt="Go"/>
+  <img src="badges/hot-reload.png" height="20" alt="Hot Reload"/>
+  <img src="badges/docker.png" height="20" alt="Docker"/>
+  <img src="badges/license.png" height="20" alt="License"/>
+  <img src="badges/linux.png" height="20" alt="Linux"/>
+  <img src="badges/http2.png" height="20" alt="HTTP/2"/>
+  <img src="badges/gmtls.png" height="20" alt="GMTLS"/>
 </p>
 
 ---
