@@ -13,21 +13,21 @@
   <br>
   <sub>Lightweight High-Performance Web Application Firewall — Pure Go, Hot-Reload Everything</sub>
   <br><br>
-  <a href="https://www.foxwaf.cn"><img src="https://img.shields.io/badge/官网-www.foxwaf.cn-ff6600?style=flat-square" alt="Official Website"/></a>
-  <a href="https://www.foxwaf.cn/docs/index.html"><img src="https://img.shields.io/badge/文档-Documentation-0ea5e9?style=flat-square" alt="Documentation"/></a>
-  <a href="https://www.foxwaf.cn/releases.html"><img src="https://img.shields.io/badge/版本-Releases-22c55e?style=flat-square" alt="Releases"/></a>
-  <a href="https://www.foxwaf.cn/announcements.html"><img src="https://img.shields.io/badge/通告-Notice-f59e0b?style=flat-square" alt="Notice"/></a>
-  <a href="https://github.com/foxwaf/foxwaf"><img src="https://img.shields.io/badge/GitHub-foxwaf%2Ffoxwaf-181717?style=flat-square&logo=github" alt="GitHub Repository"/></a>
-  <a href="https://gitcode.com/kabubu/foxwaf"><img src="https://img.shields.io/badge/GitCode-镜像仓库-c71d23?style=flat-square" alt="GitCode Mirror"/></a>
+  <a href="https://www.foxwaf.cn"><img src="./badges/website.svg" alt="Official Website"/></a>
+  <a href="https://www.foxwaf.cn/docs/index.html"><img src="./badges/documentation.svg" alt="Documentation"/></a>
+  <a href="https://www.foxwaf.cn/releases.html"><img src="./badges/releases.svg" alt="Releases"/></a>
+  <a href="https://www.foxwaf.cn/announcements.html"><img src="./badges/notice.svg" alt="Notice"/></a>
+  <a href="https://github.com/foxwaf/foxwaf"><img src="./badges/github.svg" alt="GitHub Repository"/></a>
+  <a href="https://gitcode.com/kabubu/foxwaf"><img src="./badges/gitcode.svg" alt="GitCode Mirror"/></a>
   <br>
-  <a href="#-快速开始"><img src="https://img.shields.io/badge/快速开始-30s_部署-28a745?style=flat-square" alt="Quick Start"/></a>
-  <img src="https://img.shields.io/badge/Pure_Go-00ADD8?style=flat-square&logo=go&logoColor=white" alt="Go"/>
-  <img src="https://img.shields.io/badge/Hot_Reload-无需重启-ff9800?style=flat-square" alt="Hot Reload"/>
-  <img src="https://img.shields.io/badge/Docker-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker"/>
-  <img src="https://img.shields.io/badge/License-Apache_2.0-blue?style=flat-square" alt="License"/>
-  <img src="https://img.shields.io/badge/Linux-x86__64%20|%20ARM64-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux"/>
-  <img src="https://img.shields.io/badge/HTTP%2F2-Enabled-00bcd4?style=flat-square" alt="HTTP/2"/>
-  <img src="https://img.shields.io/badge/GMTLS-国密-e91e63?style=flat-square" alt="GMTLS"/>
+  <a href="#-快速开始"><img src="./badges/quick-start.svg" alt="Quick Start"/></a>
+  <img src="./badges/pure-go.svg" alt="Go"/>
+  <img src="./badges/hot-reload.svg" alt="Hot Reload"/>
+  <img src="./badges/docker.svg" alt="Docker"/>
+  <img src="./badges/license.svg" alt="License"/>
+  <img src="./badges/linux.svg" alt="Linux"/>
+  <img src="./badges/http2.svg" alt="HTTP/2"/>
+  <img src="./badges/gmtls.svg" alt="GMTLS"/>
 </p>
 
 ---
