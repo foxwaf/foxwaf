@@ -9,6 +9,7 @@ MODE=""
 MIRROR=""
 NO_START=false
 FRESH_DEFAULT_CONF=false
+ADMIN_INITIAL_PASSWORD=""
 FOXWAF_SERVER="${FOXWAF_SERVER:-server.foxwaf.cn}"
 SERVER_API="https://${FOXWAF_SERVER}/api/update/check"
 SERVER_DOWNLOAD="https://${FOXWAF_SERVER}/release"
@@ -434,6 +435,31 @@ download_foxwaf_image_bundle() {
     mirror_download "foxwaf-image.tar.gz" "${tmp}/image.tar.gz" "$ver" "$fb" "Docker 镜像"
 }
 
+# 首次启动时 WAF 会把随机初始密码打印到 stderr（仅一次），从容器日志中抓取明文。
+# Docker 冷启动可能较慢，循环重试直到出现密码行或超时。
+capture_initial_password() {
+    # 仅全新生成默认配置时才会有初始随机密码
+    [[ "$FRESH_DEFAULT_CONF" != "true" ]] && return 1
+    local attempt logs pw
+    for attempt in $(seq 1 30); do
+        logs=$(docker logs foxwaf 2>&1 || true)
+        # 去除 ANSI 颜色码后提取"初始随机密码: XXXXXX"（定长 6 位字母数字）
+        pw=$(printf '%s' "$logs" | sed 's/\x1b\[[0-9;]*m//g' \
+            | grep -oP '初始随机密码[:：]\s*\K[A-Za-z0-9]{6}' | head -1 || true)
+        if [[ -n "$pw" ]]; then
+            ADMIN_INITIAL_PASSWORD="$pw"
+            return 0
+        fi
+        # 容器若已退出则无需再等
+        if ! docker inspect foxwaf &>/dev/null \
+            || [[ "$(docker inspect foxwaf --format '{{.State.Running}}' 2>/dev/null)" != "true" ]]; then
+            [[ "$attempt" -ge 3 ]] && return 1
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 # ─── Docker 模式安装 ─────────────────────────────────────────────────────────
 install_docker() {
     log_step "下载 (Docker 模式)"
@@ -518,6 +544,20 @@ DEOF
             log_ok "FoxWAF 运行中"
         else
             log_warn "容器可能未正常启动，请检查: foxwaf logs"
+        fi
+        if [[ "$FRESH_DEFAULT_CONF" == "true" ]]; then
+            # 后台子进程修改不到父变量，用临时文件回传抓取结果
+            local pwfile; pwfile=$(mktemp)
+            ( capture_initial_password; printf '%s' "$ADMIN_INITIAL_PASSWORD" > "$pwfile" ) &
+            spinner $! "正在获取初始管理员密码"
+            [[ "$IS_TTY" == "true" ]] && echo ""
+            ADMIN_INITIAL_PASSWORD=$(cat "$pwfile" 2>/dev/null || true)
+            rm -f "$pwfile"
+            if [[ -n "$ADMIN_INITIAL_PASSWORD" ]]; then
+                log_ok "初始密码已获取"
+            else
+                log_warn "暂未获取到初始密码，可稍后用 foxwaf logs 查看"
+            fi
         fi
     fi
 }
@@ -632,7 +672,9 @@ print_success() {
     echo ""
     echo -e "  ${DIM}账号${RESET}      ${admin_user}"
     if [[ "$FRESH_DEFAULT_CONF" == "true" ]]; then
-        if [[ "$NO_START" == "true" ]]; then
+        if [[ -n "$ADMIN_INITIAL_PASSWORD" ]]; then
+            echo -e "  ${DIM}密码${RESET}      ${BOLD}${GREEN}${ADMIN_INITIAL_PASSWORD}${RESET}  ${DIM}(初始随机密码，仅显示一次，请尽快登录修改)${RESET}"
+        elif [[ "$NO_START" == "true" ]]; then
             echo -e "  ${DIM}密码${RESET}      首次启动时随机生成，请用 ${BOLD}foxwaf logs${RESET} 查看“初始随机密码”"
         else
             echo -e "  ${DIM}密码${RESET}      已随机生成，请用 ${BOLD}foxwaf logs${RESET} 查看“初始随机密码”"
