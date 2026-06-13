@@ -1047,11 +1047,33 @@ _sorted_mirrors() {
     done | sort
 }
 
-# 单源下载：无进度条，用 spinner
+# 单源下载：能探测到大小时显示进度条（复用 probe_total_size/progress_bar），否则回退 spinner
 _download_one() {
     local url="$1" dest="$2" label="${3:-下载中}"
-    local tmpfile="${dest}.tmp" ret
+    local tmpfile="${dest}.tmp" total_size dl_pid cur_size ret
     rm -f "$tmpfile"
+
+    total_size=$(probe_total_size "$url") || total_size=""
+    if [[ "$IS_TTY" == "true" && -n "$total_size" && "$total_size" -gt 0 ]] 2>/dev/null; then
+        curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
+        dl_pid=$!
+        while kill -0 "$dl_pid" 2>/dev/null; do
+            [[ -f "$tmpfile" ]] && cur_size=$(stat -c%s "$tmpfile" 2>/dev/null || echo 0) && progress_bar "$cur_size" "$total_size" "$label"
+            sleep 0.3
+        done
+        wait "$dl_pid" 2>/dev/null
+        ret=$?
+        if [[ $ret -eq 0 && -f "$tmpfile" ]]; then
+            progress_bar "$total_size" "$total_size" "$label"
+            echo ""
+            mv "$tmpfile" "$dest"
+            return 0
+        fi
+        rm -f "$tmpfile"
+        return 1
+    fi
+
+    # 探测不到大小（如镜像跳转 S3 无 Content-Length）或非 TTY：回退 spinner
     curl -fSL --connect-timeout 15 --max-time 600 -o "$tmpfile" "$url" 2>/dev/null &
     spinner $! "$label"
     ret=$?
@@ -1116,9 +1138,6 @@ do_update() {
         return 1
     fi
     cv=$(_live_version_clean "$cv_raw")
-    if _is_stale "$cv_raw"; then
-        log_warn "未连到容器，按本地缓存当作 ${cv}（实际可能更新）"
-    fi
     log_dim "当前版本: ${cv}"
 
     # ── 镜像 tag 与 binary 漂移检查（静默，不展示给用户）──
@@ -1166,23 +1185,22 @@ do_update() {
         fi
     fi
 
+    # 列表形式展示（CJK 字符宽度不定，画框右侧难对齐，改用无框列表）
     _gap
-    printf "  ${C}${B}╭─────────────────────────────────────────╮${N}\n"
     if [[ "$cmp" == "-1" ]]; then
-        printf "  ${C}${B}│${N}  ${R}⬇${N}  ${R}降级${N}: ${B}%-29s${N}${C}${B}│${N}\n" "$nv"
+        printf "  ${R}⬇${N}  ${R}${B}降级${N}  ${DM}${cv}${N} ${DM}→${N} ${R}${B}${nv}${N}\n"
     else
-        printf "  ${C}${B}│${N}  ${G}⬆${N}  新版本可用: ${B}%-24s${C}${B}│${N}\n" "$nv"
+        printf "  ${G}⬆${N}  ${W}${B}新版本可用${N}  ${DM}${cv}${N} ${DM}→${N} ${G}${B}${nv}${N}\n"
     fi
     if [[ -n "$ft" ]]; then
-        # 将 JSON 中的 \\n 转义换成真正的换行，逐行展示
+        # 将 JSON 中的 \\n 转义换成真正的换行，逐行展示；read 默认 IFS 去掉行首尾空白
         local line
-        while IFS= read -r line; do
-            [[ -z "${line## }" ]] && continue
-            printf "  ${C}${B}│${N}     ${DM}%-36s${N}${C}${B}│${N}\n" "$line"
+        while read -r line; do
+            [[ -z "$line" ]] && continue
+            line="${line//%%/%}"
+            printf "       ${DM}•${N} ${DM}%s${N}\n" "$line"
         done < <(echo "$ft" | sed 's/\\n/\n/g')
     fi
-    printf "  ${C}${B}│${N}     ${DM}当前: %-30s${N}${C}${B}│${N}\n" "$cv"
-    printf "  ${C}${B}╰─────────────────────────────────────────╯${N}\n"
     _gap
 
     confirm "立即更新？" || { log_dim "已取消"; return 0; }
@@ -1247,25 +1265,14 @@ do_uninstall() {
 }
 
 do_version() {
-    local raw clean iv
+    local raw clean
     raw=$(_live_version)
     if [[ -z "$raw" ]]; then
         echo "FoxWAF unknown"
         return
     fi
     clean=$(_live_version_clean "$raw")
-    if _is_stale "$raw"; then
-        # 容器没起来，只能给本地文件值，明确告知用户这是缓存
-        echo "FoxWAF ${clean}  (image tag, container not running)"
-        return
-    fi
-    iv=$(_image_version)
-    if is_docker && [[ -n "$iv" && "$iv" != "$clean" ]]; then
-        # 漂移：binary 真实版本 vs 镜像 tag 不一致
-        printf 'FoxWAF %s  ${Y}(container)${N}  image: %s  ${Y}(drift, restart will revert)${N}\n' "$clean" "$iv"
-    else
-        echo "FoxWAF ${clean}"
-    fi
+    echo "FoxWAF ${clean}"
 }
 
 # ╔═══════════════════════════════════════════════════════════════╗
