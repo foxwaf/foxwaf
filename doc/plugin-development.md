@@ -134,10 +134,12 @@ func SetHostAPI(
 
 | HostAPI | 作用 |
 |---|---|
-| `addACLBlock(ip, source, desc, expireUnix)` | 把 IP 以 `global+ip+block` 写入中央 ACL，带 TTL。白名单命中自动跳过；同 `(source, ip)` 幂等刷新；自动条目总数硬上限 5000 |
-| `isWhitelisted(ip)` | 查询 ACL 是否存在匹配该 IP 的 `action=allow` 规则 |
+| `addACLBlock(ip, source, desc, expireUnix)` | 把 IP 以 `global+ip+block` 写入中央 ACL，带 TTL。同 `(source, ip)` 幂等刷新；自动条目总数硬上限 5000 |
+| `isWhitelisted(ip)` | **零信任策略：固定返回 `false`**。保留该参数仅为签名兼容，插件不得因 IP「在白名单里」而跳过检测或免于拉黑 |
 | `getClientIP(r)` | 用主进程可信代理规则解析客户端 IP，与 WAF/ACL/CC **完全一致**，避免 X-Real-IP 被伪造 |
 
+> ⛔ **零信任策略**：插件侧 `isWhitelisted` 恒为 `false`，`addACLBlock` 也不再因白名单跳过写入 —— 插件的检测与拉黑对所有来源 IP 一视同仁。需要放行可信 IP，请在「ACL 管理」页统一配置 `action=allow` 规则，不要依赖插件内部白名单判断。
+>
 > **强烈建议**：任何涉及"对 IP 判断"的插件都用 `getClientIP` 取 IP，不要自己读 header。
 
 ### 3.4 **必须**：`SetPluginLogger`（实时事件日志）
@@ -245,7 +247,7 @@ if sig := matchAIBot(uaLower); sig != "" {
 
 1. 解压到临时目录
 2. 校验目录结构与 `version.json`
-3. 用**主进程当前的 Go 工具链**（默认 Go 1.24.9）执行 `go build -buildmode=plugin -o plugin.so main.go`
+3. 用**主进程当前的 Go 工具链**（当前发布构建为官方 `go1.26.4`）执行 `go build -buildmode=plugin -o plugin.so main.go`
 4. 失败则在响应里返回编译错误；成功则把插件写入 `/app/plugins/<name>-<ver>/` 并热加载
 
 你无需本地搭建 Go 环境，上传 zip 就行。
@@ -307,10 +309,16 @@ zip 内 **必须** 只有一个顶层目录，目录名必须等于 `<name>-<ver
 
 源码位置：[`plugins/scan-guard-1.0.0/source/main.go`](../plugins/scan-guard-1.0.0/source/main.go)，可作为模板参考。
 
-> 📦 **本仓库开源插件**：[`plugins/`](../plugins/) 目录下提供了 3 个可直接参考的实战插件：
-> - [`scan-guard-1.0.0`](../plugins/scan-guard-1.0.0/) — 目录扫描防护（AfterResponse + HostAPI + 中央 ACL）
-> - [`useragent-validator-1.0.0`](../plugins/useragent-validator-1.0.0/) — 扫描器 UA 黑名单
-> - [`filename-validator-1.0.0`](../plugins/filename-validator-1.0.0/) — 敏感文件名拦截
+> 📦 **本仓库开源插件**：[`plugins/`](../plugins/) 目录下提供了 9 个可直接参考的实战插件（默认均挂在 `before_waf`）：
+> - [`scan-guard-1.0.0`](../plugins/scan-guard-1.0.0/) — 目录扫描 / 404 爆破防护（AfterResponse + HostAPI + 中央 ACL）
+> - [`useragent-validator-1.0.0`](../plugins/useragent-validator-1.0.0/) — 空值 / 超长 UA 与扫描器关键词拦截
+> - [`filename-validator-1.0.0`](../plugins/filename-validator-1.0.0/) — multipart 文件名危险字符、路径穿越与空字节拦截
+> - [`ai-shield-1.0.0`](../plugins/ai-shield-1.0.0/) — AI 训练爬虫 UA 黑名单与 Prompt Injection 检测
+> - [`cloud-ssrf-1.0.0`](../plugins/cloud-ssrf-1.0.0/) — 云元数据地址与危险 scheme 拦截（含 IP 进制归一化）
+> - [`auth-guard-1.0.0`](../plugins/auth-guard-1.0.0/) — 登录端点暴破 / 撞库防护（AfterResponse 滑窗失败计数）
+> - [`smuggler-guard-1.0.0`](../plugins/smuggler-guard-1.0.0/) — HTTP 请求走私、CRLF 注入与异常 Content-Length 检测
+> - [`tool-fingerprint-1.0.0`](../plugins/tool-fingerprint-1.0.0/) — 扫描器 UA 指纹与 OOB 域名识别
+> - [`graphql-guard-1.0.0`](../plugins/graphql-guard-1.0.0/) — GraphQL 查询深度 / Alias 限制与 introspection 拦截
 
 ---
 
