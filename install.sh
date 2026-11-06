@@ -551,6 +551,17 @@ services:
       - ./conf.yaml:/app/conf.yaml
       - ./source.enc:/app/source.enc
       - ./data:/app/data
+    # AI 助手（codex）的沙箱依赖 bubblewrap 创建 user/pid namespace。docker 默认丢弃
+    # CAP_SYS_ADMIN 且 seccomp 拦 unshare，bwrap 会直接报
+    # "bwrap: No permissions to create new namespace"，agent 连只读命令都跑不了。
+    # 放开的是「让沙箱能建起来」的前提，沙箱本身仍是 workspace-write，不是给 agent 提权。
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - seccomp:unconfined
+      # 宿主机启用 AppArmor 时（Ubuntu 20.04+ 默认开启），docker-default profile 会拦
+      # bwrap 在 mount namespace 里对 / 做 slave 重挂载（Failed to make / slave）。
+      - apparmor:unconfined
 DEOF
     log_ok "Compose 配置已生成（conf.yaml、source.enc、data/ 与插件配置已持久化）"
     echo "$VERSION" > "$INSTALL_DIR/.version"
